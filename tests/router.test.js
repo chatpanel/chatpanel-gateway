@@ -28,10 +28,17 @@ test('matches by destination id when no model membership', () => {
   assert.equal(d.id, 'claude');
 });
 
-test('/v1/models aggregates every destination model (deduped)', () => {
+test('/v1/models aggregates configured models + the always-available known agents', () => {
   const m = aggregateModels({ destinations: DESTS });
   const ids = m.data.map((x) => x.id);
-  assert.deepEqual(ids, ['codex', 'gpt-5-codex', 'claude', 'gpt-4o', 'llama3.2']);
+  // Configured destinations' models first…
+  for (const id of ['codex', 'gpt-5-codex', 'claude', 'gpt-4o', 'llama3.2']) {
+    assert.ok(ids.includes(id), `missing configured model ${id}`);
+  }
+  // …plus the known CLI agents that always work via the bridge (no API key).
+  for (const a of ['opencode', 'pi', 'kiro', 'antigravity']) {
+    assert.ok(ids.includes(a), `missing always-available agent ${a}`);
+  }
   assert.equal(m.object, 'list');
 });
 
