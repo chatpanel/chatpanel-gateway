@@ -48,6 +48,7 @@ export function publicConfig(cfg, { proUnlocked = false } = {}) {
       autoNarrow: cfg.tools?.autoNarrow !== false,
       maxPerTurn: Number(cfg.tools?.maxPerTurn) > 0 ? Number(cfg.tools.maxPerTurn) : 8,
       narrowAll: !!cfg.tools?.narrowAll,
+      toolData: cfg.tools?.toolData === 'redactRemote' ? 'redactRemote' : 'real',
     },
   };
 }
@@ -105,6 +106,7 @@ export function applyConfigPatch(cfg, patch = {}) {
     cfg.tools = cfg.tools || {};
     if ('autoNarrow' in patch.tools) cfg.tools.autoNarrow = !!patch.tools.autoNarrow;
     if ('narrowAll' in patch.tools) cfg.tools.narrowAll = !!patch.tools.narrowAll;
+    if (patch.tools.toolData === 'real' || patch.tools.toolData === 'redactRemote') cfg.tools.toolData = patch.tools.toolData;
     const cap = Number(patch.tools.maxPerTurn);
     if (Number.isFinite(cap) && cap >= 1) cfg.tools.maxPerTurn = Math.floor(cap);
   }

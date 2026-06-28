@@ -55,16 +55,19 @@ export function extractLatestToolResult(body) {
 }
 
 // Restore a buffered (non-streaming) response: assistant text + tool-call args.
-export function restoreResponse(json, vault) {
+export function restoreResponse(json, vault, harness = null) {
   for (const choice of json?.choices || []) {
     const msg = choice?.message;
     if (!msg) continue;
-    // Visible text keeps the pseudonym (restoreText); tool-call args get the REAL
-    // value (restoreDeepAliases) so the client runs the tool on real data.
+    // Visible text keeps the pseudonym (restoreText); tool-call args go through the
+    // shared harness — real values so the client runs the tool on real data, or the
+    // redacted token kept for remote MCP tools under "redact remote".
     if (typeof msg.content === 'string') msg.content = restoreText(msg.content, vault);
     for (const tc of msg.tool_calls || []) {
       if (tc?.function && typeof tc.function.arguments === 'string') {
-        tc.function.arguments = restoreDeepAliases(tc.function.arguments, vault);
+        tc.function.arguments = harness
+          ? harness.toTool(tc.function.name, tc.function.arguments)
+          : restoreDeepAliases(tc.function.arguments, vault);
       }
     }
   }

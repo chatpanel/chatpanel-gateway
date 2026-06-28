@@ -136,6 +136,35 @@ test('auto-narrow: trims MCP tools to top-k by relevance, never drops the client
   gw.close(); up.close();
 });
 
+test('redact-remote: gateway harness keeps the redacted token for remote MCP tool args, real for non-MCP', async () => {
+  const up = await fakeUpstream((body, req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok', tool_calls: [
+      { id: 'a', type: 'function', function: { name: 'mcp_wiki__search', arguments: JSON.stringify({ q: 'Twinkle' }) } },
+      { id: 'b', type: 'function', function: { name: 'calc', arguments: JSON.stringify({ q: 'Twinkle' }) } },
+    ] }, finish_reason: 'tool_calls' }] }));
+  });
+  const gw = createGateway({
+    host: '127.0.0.1', port: 0, backend: 'api',
+    upstreams: { openai: { baseUrl: `http://127.0.0.1:${up.port}` }, anthropic: {} },
+    redaction: { tier: 'basic', dictionary: [{ value: 'John', alias: 'Twinkle' }], detection: { backend: 'off' } },
+    tools: { toolData: 'redactRemote' },
+    ner: { autostart: false }, allowedOrigins: [], maxBodyBytes: 1 << 20, logRequests: false,
+  });
+  const port = await listen(gw);
+  const r = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: 'I am John' }] }),
+  });
+  const tcs = (await r.json()).choices[0].message.tool_calls;
+  const wiki = tcs.find((t) => t.function.name === 'mcp_wiki__search').function.arguments;
+  const calc = tcs.find((t) => t.function.name === 'calc').function.arguments;
+  assert.match(wiki, /Twinkle/, 'remote MCP tool keeps the redacted token (PII off the server)');
+  assert.doesNotMatch(wiki, /John/);
+  assert.match(calc, /John/, 'non-MCP (local) tool gets the real value');
+  gw.close(); up.close();
+});
+
 test('loop guard: refuses to forward to a destination that is the gateway itself', async () => {
   const gw = createGateway({
     host: '127.0.0.1', port: 4320, // self port; destination below points here

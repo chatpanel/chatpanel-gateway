@@ -97,12 +97,16 @@ function makeFieldRestorer(vault, restoreFn) {
 // model + user keep the pseudonym) but TOOL-CALL argument deltas with
 // restoreWithAliases (the client runs the tool on the REAL value). Passes through
 // any non-JSON event untouched.
-export async function pipeRestoredOpenAIStream(upstreamBody, nodeRes, vault) {
+export async function pipeRestoredOpenAIStream(upstreamBody, nodeRes, vault, harness = null) {
   const reader = upstreamBody.getReader();
   const decoder = new TextDecoder();
   let buf = '';
   const contentR = makeFieldRestorer(vault, restoreText);
-  const argRs = new Map(); // tool_call index -> field restorer (aliases)
+  const argRs = new Map();      // tool_call index -> field restorer
+  const toolNames = new Map();  // tool_call index -> name (for redact-remote decisions)
+  // Tool args go through the shared harness (real, or kept-redacted for remote MCP
+  // under redactRemote); without a harness, default to real values (aliases undone).
+  const argFn = (idx) => (text, v) => (harness ? harness.toTool(toolNames.get(idx) || '', text) : restoreWithAliases(text, v));
 
   const handleBlock = (block) => {
     const out = [];
@@ -123,8 +127,9 @@ export async function pipeRestoredOpenAIStream(upstreamBody, nodeRes, vault) {
         if (typeof d.content === 'string') d.content = contentR.push(d.content);
         for (const tc of d.tool_calls || []) {
           const idx = typeof tc.index === 'number' ? tc.index : 0;
+          if (tc.function && typeof tc.function.name === 'string' && tc.function.name) toolNames.set(idx, tc.function.name);
           if (tc.function && typeof tc.function.arguments === 'string') {
-            if (!argRs.has(idx)) argRs.set(idx, makeFieldRestorer(vault, restoreWithAliases));
+            if (!argRs.has(idx)) argRs.set(idx, makeFieldRestorer(vault, argFn(idx)));
             tc.function.arguments = argRs.get(idx).push(tc.function.arguments);
           }
         }

@@ -21,7 +21,7 @@ import { createServer } from 'node:http';
 import { loadConfig } from './config.js';
 import { redactSegments } from './redact.js';
 import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer } from './stream.js';
-import { restoreText, effectiveTier, gatedDictionary, narrowSpecs } from '@chatpanel/pii';
+import { restoreText, effectiveTier, gatedDictionary, narrowSpecs, makeToolHarness } from '@chatpanel/pii';
 import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
 import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
 import { shaperFor } from './shape.js';
@@ -33,7 +33,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.4.3';
+export const VERSION = '0.5.0';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -201,12 +201,12 @@ async function pumpRelay(res, s, shaper) {
 }
 
 // New tool-enabled turn: open the bridge with the client's tools as MCP specs.
-async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, isPro, tools) {
+async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, isPro, tools, harness = null) {
   const { messages, system } = adapter.toTurn(body);
   const token = readBridgeToken(cfg.bridge.token);
   const shaper = shaperFor(kind, body?.model || agent);
   const redactOpts = { tier: effectiveTier({ tier: cfg.redaction.tier }, isPro), dictionary: gatedDictionary(cfg.redaction, isPro), entities: [] };
-  const s = createRelaySession({ vault, redactOpts, bridgeUrl: cfg.bridge.url, token });
+  const s = createRelaySession({ vault, redactOpts, bridgeUrl: cfg.bridge.url, token, harness });
   const ttl = setTimeout(() => endRelaySession(s.id), 135_000); // bridge tool-call timeout is 120s
   let resp;
   try {
@@ -228,7 +228,7 @@ async function resumeRelay(res, s, toolContent, model) {
   return pumpRelay(res, s, shaper);
 }
 
-async function handleBridge(req, res, { kind, adapter, redactable, pathname, agentOverride }, body, vault, cfg, isPro) {
+async function handleBridge(req, res, { kind, adapter, redactable, pathname, agentOverride, harness }, body, vault, cfg, isPro) {
   if (!redactable) {
     return sendJson(res, 404, { error: `endpoint ${pathname} not supported by the bridge backend` });
   }
@@ -244,7 +244,7 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
     }
     const tools = adapter.extractTools(body);
     if (tools.length && body?.stream === true) {
-      return startRelay(req, res, { kind, adapter, agent: agentOverride || pickAgent(body?.model, cfg) }, body, vault, cfg, isPro, tools);
+      return startRelay(req, res, { kind, adapter, agent: agentOverride || pickAgent(body?.model, cfg) }, body, vault, cfg, isPro, tools, harness);
     }
   }
 
@@ -288,7 +288,7 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
 
 // ---- backend: api ----------------------------------------------------------
 
-async function handleApi(req, res, { adapter, kind, pathname, search, base, destKey, destProtocol }, outBody, vault) {
+async function handleApi(req, res, { adapter, kind, pathname, search, base, destKey, destProtocol, harness }, outBody, vault) {
   let upstream;
   try {
     const headers = forwardHeaders(req.headers, base);
@@ -313,16 +313,17 @@ async function handleApi(req, res, { adapter, kind, pathname, search, base, dest
 
   if (ct.includes('text/event-stream') && upstream.body) {
     res.writeHead(upstream.status, resHeaders);
-    // OpenAI streaming: restore tool-call args with real values (aliases undone)
-    // while keeping visible text pseudonymized. Other protocols: generic restore.
-    const pipe = kind === 'openai' ? pipeRestoredOpenAIStream : pipeRestoredStream;
-    return pipe(upstream.body, res, vault);
+    // OpenAI streaming: restore tool-call args via the harness (real, or kept
+    // redacted for remote MCP under redactRemote) while keeping visible text
+    // pseudonymized. Other protocols: generic restore.
+    if (kind === 'openai') return pipeRestoredOpenAIStream(upstream.body, res, vault, harness);
+    return pipeRestoredStream(upstream.body, res, vault);
   }
 
   const buf = Buffer.from(await upstream.arrayBuffer());
   if (vault && ct.includes('application/json')) {
     try {
-      const json = adapter.restoreResponse(JSON.parse(buf.toString('utf8')), vault);
+      const json = adapter.restoreResponse(JSON.parse(buf.toString('utf8')), vault, harness);
       res.writeHead(upstream.status, { ...resHeaders, 'content-type': 'application/json' });
       return res.end(Buffer.from(JSON.stringify(json), 'utf8'));
     } catch { /* fall through */ }
@@ -461,6 +462,12 @@ export function createGateway(cfg = loadConfig()) {
       }
     }
 
+    // THE shared tool harness — same one the extension uses. The gateway only needs
+    // ② (tool args): restore to real for the client to run, or keep the redacted
+    // token for remote MCP tools when tools.toolData is "redactRemote". Results are
+    // re-redacted by the NEXT request's normal redaction, so ③ isn't needed here.
+    const harness = makeToolHarness({ vault, toolData: cfg.tools?.toolData });
+
     // Route by the requested model → a destination (agent via the bridge, or an
     // API we forward to). Falls back to the legacy backend when none configured.
     const dest = resolveDestination(body?.model, cfg, r.kind);
@@ -473,9 +480,9 @@ export function createGateway(cfg = loadConfig()) {
       if (isSelfUrl(dest.baseUrl, cfg)) {
         return sendJson(res, 508, { error: { message: `destination "${dest.id}" points back at the gateway (${dest.baseUrl}) — refusing to forward (would loop).`, type: 'loop_detected' } });
       }
-      return handleApi(req, res, { ...r, pathname, search: url.search, base: dest.baseUrl, destKey: dest.apiKey, destProtocol: dest.protocol }, outBody, vault);
+      return handleApi(req, res, { ...r, pathname, search: url.search, base: dest.baseUrl, destKey: dest.apiKey, destProtocol: dest.protocol, harness }, outBody, vault);
     }
-    return handleBridge(req, res, { ...r, pathname, agentOverride: dest?.agent }, body, vault, cfg, isPro);
+    return handleBridge(req, res, { ...r, pathname, agentOverride: dest?.agent, harness }, body, vault, cfg, isPro);
   });
 }
 

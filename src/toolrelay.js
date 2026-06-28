@@ -35,9 +35,9 @@ export function toolsToSpecs(tools) {
     .map((t) => ({ name: t.function.name, description: t.function.description || '', parameters: t.function.parameters || { type: 'object', properties: {} } }));
 }
 
-export function createRelaySession({ vault, redactOpts, bridgeUrl, token }) {
+export function createRelaySession({ vault, redactOpts, bridgeUrl, token, harness = null }) {
   const id = randomUUID().slice(0, 8);
-  const s = { id, reader: null, decoder: new TextDecoder(), buf: '', bridgeSessionId: null, toolId: null, vault: vault || createVault(), redactOpts: redactOpts || { tier: 'basic' }, bridgeUrl, token, done: false };
+  const s = { id, reader: null, decoder: new TextDecoder(), buf: '', bridgeSessionId: null, toolId: null, vault: vault || createVault(), redactOpts: redactOpts || { tier: 'basic' }, bridgeUrl, token, harness, done: false };
   sessions.set(id, s);
   return s;
 }
@@ -68,8 +68,11 @@ export async function pumpBridgeStream(s, handlers) {
           handlers.onText(evt.text);
         } else if (evt.type === 'tool_request') {
           s.bridgeSessionId = evt.session; s.toolId = evt.id;
-          // restore placeholders so the CLIENT runs the tool on REAL values
-          const restoredArgs = restoreDeep(evt.input ?? {}, s.vault);
+          // ② via the shared harness: real values so the CLIENT runs the tool on
+          // them, or the redacted token kept for remote MCP under "redact remote".
+          const restoredArgs = s.harness
+            ? s.harness.toTool(evt.name, evt.input ?? {})
+            : restoreDeep(evt.input ?? {}, s.vault);
           handlers.onToolRequest({ name: evt.name, restoredArgs, toolId: encodeToolCallId(s.id, evt.id) });
           return 'parked';
         } else if (evt.type === 'done') {
