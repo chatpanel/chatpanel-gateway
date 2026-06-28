@@ -2,11 +2,12 @@
 # Compile the gateway into standalone, single-file binaries (no Node required to
 # run them). Needs Bun: https://bun.sh
 #
-# Note: the bundled spaCy NER server (ner/) is NOT embedded in the binary — NER
-# autostart fails open to deterministic redaction in a compiled binary. Source/npm
-# installs get the bundled NER.
+# The spaCy NER server (ner/) IS embedded — base64'd into src/ner-assets.js — so a
+# compiled binary materializes a runnable ner/ to ~/.chatpanel/ner at startup and
+# autostarts NER (venv + install + serve) just like the npm install.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+node scripts/gen-ner-assets.mjs   # keep embedded NER in lockstep with ner/
 mkdir -p dist
 rm -f dist/chatpanel-gateway-*
 

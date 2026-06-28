@@ -9,10 +9,32 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from 'node:fs';
 import os from 'node:os';
+import { NER_ASSETS } from './ner-assets.js';
 
-const NER_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'ner');
+// Where the NER server lives ON DISK. We always run from a real, writable user dir
+// (~/.chatpanel/ner) rather than the package's ner/ — because a STANDALONE BINARY
+// has no ner/ on the filesystem at all (it's inside the SEA snapshot), and a global
+// npm dir may be read-only. The venv + installed deps persist here across restarts.
+function materializeNerDir() {
+  const dir = join(os.homedir(), '.chatpanel', 'ner');
+  try {
+    mkdirSync(dir, { recursive: true });
+    for (const [name, b64] of Object.entries(NER_ASSETS)) {
+      const target = join(dir, name);
+      const want = Buffer.from(b64, 'base64');
+      // Refresh the scripts if changed (pick up updates), but never touch .venv.
+      const have = existsSync(target) ? readFileSync(target) : null;
+      if (!have || !have.equals(want)) writeFileSync(target, want);
+      if (name.endsWith('.sh')) { try { chmodSync(target, 0o755); } catch { /* best effort */ } }
+    }
+    return dir;
+  } catch (e) {
+    console.log(`[ner] could not materialize NER dir at ${dir} (${e.message})`);
+    return null;
+  }
+}
 
 // A login service (LaunchAgent / systemd) inherits a MINIMAL PATH — not your
 // shell's — so `bash` and a pyenv/homebrew `python3` aren't found. Resolve bash
@@ -86,10 +108,14 @@ export function startNer(cfg) {
     // 1) Adopt an existing NER already serving on the port (e.g. the user's own).
     if (await nerReachable(port, ac.signal)) { wire('using existing NER'); return; }
 
-    // 2) Otherwise launch the bundled spaCy server.
+    // 2) Otherwise launch the bundled spaCy server — materializing run.sh +
+    //    server.py + requirements.txt to a real on-disk dir first (the binary has
+    //    no ner/ on the FS). run.sh then creates the venv, installs deps, and runs.
+    const nerDir = materializeNerDir();
+    if (!nerDir) { console.log('[ner] no writable NER dir — deterministic redaction only'); return; }
     try {
       child = spawn(resolveBash(), ['run.sh'], {
-        cwd: NER_DIR,
+        cwd: nerDir,
         env: {
           ...process.env,
           PORT: String(port),
@@ -129,7 +155,7 @@ export function startNer(cfg) {
       if (await nerReachable(port, ac.signal)) { wire('ready'); return; }
       await sleep(1000);
     }
-    if (!stopped) console.log('[ner] not ready after 300s — continuing deterministic-only (run ./ner/run.sh manually to debug).');
+    if (!stopped) console.log(`[ner] not ready after 300s — continuing deterministic-only (run ${join(os.homedir(), '.chatpanel', 'ner', 'run.sh')} manually to debug).`);
   })();
 
   const stop = () => {

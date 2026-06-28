@@ -1,6 +1,6 @@
 {
   "name": "@chatpanel/gateway",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Local privacy gateway — redacts PII out of OpenAI/Anthropic API traffic before it reaches a model, then restores it in the reply. Point opencode, codex, aider, Claude Code, etc. at it.",
   "type": "module",
   "bin": {
@@ -14,7 +14,9 @@
     "start": "node bin/chatpanel-gateway.js",
     "test": "node --test",
     "typecheck": "tsc -p tsconfig.json",
-    "build:bin": "bash scripts/build-binaries.sh"
+    "build:bin": "bash scripts/build-binaries.sh",
+    "gen:ner": "node scripts/gen-ner-assets.mjs",
+    "prepublishOnly": "node scripts/gen-ner-assets.mjs"
   },
   "files": [
     "src",
