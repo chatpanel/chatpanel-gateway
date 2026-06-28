@@ -84,7 +84,16 @@ export function startNer(cfg) {
     try {
       child = spawn(resolveBash(), ['run.sh'], {
         cwd: NER_DIR,
-        env: { ...process.env, PORT: String(port), PATH: enrichedPath() },
+        env: {
+          ...process.env,
+          PORT: String(port),
+          PATH: enrichedPath(),
+          // Force official PyPI: a machine pinned to a private/corp index (in
+          // pip.conf) can't reach it off-VPN, which breaks the one-time install.
+          PIP_INDEX_URL: process.env.CHATPANEL_PIP_INDEX_URL || 'https://pypi.org/simple',
+          PIP_EXTRA_INDEX_URL: '',
+          PIP_DISABLE_PIP_VERSION_CHECK: '1',
+        },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (e) {
