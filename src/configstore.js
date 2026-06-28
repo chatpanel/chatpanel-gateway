@@ -2,15 +2,19 @@
 // configure it live over the localhost API (GET/POST /config). The gateway stays
 // authoritative — the extension is just a UI client.
 
-import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import os from 'node:os';
 
+// Default to a writable per-user location, NOT process.cwd(): when the gateway
+// runs as a login service its cwd is "/" (read-only → EROFS on save).
 export function configPath(env = process.env) {
-  return env.CHATPANEL_GATEWAY_CONFIG || join(process.cwd(), 'gateway.config.json');
+  return env.CHATPANEL_GATEWAY_CONFIG || join(os.homedir(), '.chatpanel', 'gateway.config.json');
 }
 
 // Persist the user-editable subset (not derived runtime state).
 export function persistConfig(cfg, path = configPath()) {
+  mkdirSync(dirname(path), { recursive: true });
   const out = {
     host: cfg.host, port: cfg.port, backend: cfg.backend,
     bridge: cfg.bridge, upstreams: cfg.upstreams, redaction: cfg.redaction,

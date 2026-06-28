@@ -7,6 +7,7 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import os from 'node:os';
 
 const DEFAULTS = {
   host: '127.0.0.1',
@@ -100,7 +101,9 @@ function deepMerge(base, over) {
 export function loadConfig(env = process.env) {
   let cfg = DEFAULTS;
 
-  const path = env.CHATPANEL_GATEWAY_CONFIG || join(process.cwd(), 'gateway.config.json');
+  // Writable per-user location by default (NOT cwd — a login service runs with
+  // cwd "/", which is read-only). Same path persistConfig() writes to.
+  const path = env.CHATPANEL_GATEWAY_CONFIG || join(os.homedir(), '.chatpanel', 'gateway.config.json');
   if (existsSync(path)) {
     try {
       cfg = deepMerge(cfg, JSON.parse(readFileSync(path, 'utf8')));
