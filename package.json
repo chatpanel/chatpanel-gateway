@@ -1,0 +1,52 @@
+{
+  "name": "chatpanel-gateway",
+  "version": "0.1.0",
+  "description": "Local privacy gateway — redacts PII out of OpenAI/Anthropic API traffic before it reaches a model, then restores it in the reply. Point opencode, codex, aider, Claude Code, etc. at it.",
+  "type": "module",
+  "bin": {
+    "chatpanel-gateway": "bin/chatpanel-gateway.js"
+  },
+  "main": "src/server.js",
+  "exports": {
+    ".": "./src/server.js"
+  },
+  "scripts": {
+    "start": "node bin/chatpanel-gateway.js",
+    "test": "node --test",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "files": [
+    "src",
+    "bin",
+    "ner",
+    "gateway.config.example.json",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "chatpanel-pii": "file:../chatpanel-pii"
+  },
+  "homepage": "https://chatpanel.net",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chatpanel/chatpanel-gateway.git"
+  },
+  "keywords": [
+    "privacy",
+    "pii",
+    "redaction",
+    "pseudonymization",
+    "llm",
+    "proxy",
+    "gateway",
+    "openai",
+    "anthropic",
+    "opencode",
+    "codex"
+  ],
+  "author": "ChatPanel (https://chatpanel.net)",
+  "license": "SEE LICENSE IN LICENSE"
+}

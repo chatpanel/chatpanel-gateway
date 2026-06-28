@@ -1,0 +1,15 @@
+{
+  "//": "No build step — this only type-checks the plain-JS sources (npm run typecheck) so editors catch mistakes. The runtime is the .js files as-is.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["src/**/*.js", "bin/**/*.js"]
+}

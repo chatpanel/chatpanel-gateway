@@ -1,0 +1,33 @@
+{
+  "host": "127.0.0.1",
+  "port": 4320,
+
+  "backend": "bridge",
+  "bridge": {
+    "url": "http://127.0.0.1:4319",
+    "agent": "codex",
+    "token": ""
+  },
+
+  "upstreams": {
+    "openai": { "baseUrl": "https://api.openai.com" },
+    "anthropic": { "baseUrl": "https://api.anthropic.com" }
+  },
+
+  "redaction": {
+    "tier": "full",
+    "redactSystem": true,
+    "dictionary": [
+      { "value": "Acme Corp", "type": "ORG" },
+      { "value": "Project Atlas", "alias": "Project Nimbus" }
+    ]
+  },
+
+  "ner": {
+    "autostart": true,
+    "port": 9009,
+    "enableFullTier": true
+  },
+
+  "logRequests": true
+}
