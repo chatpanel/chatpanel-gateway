@@ -9,8 +9,29 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { existsSync } from 'node:fs';
+import os from 'node:os';
 
 const NER_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'ner');
+
+// A login service (LaunchAgent / systemd) inherits a MINIMAL PATH — not your
+// shell's — so `bash` and a pyenv/homebrew `python3` aren't found. Resolve bash
+// absolutely and enrich PATH with the usual locations so run.sh + python3 work.
+function resolveBash() {
+  for (const p of ['/bin/bash', '/usr/bin/bash', '/usr/local/bin/bash', '/opt/homebrew/bin/bash']) {
+    if (existsSync(p)) return p;
+  }
+  return 'bash';
+}
+
+function enrichedPath(home = os.homedir(), base = process.env.PATH || '') {
+  const extra = [
+    '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin',
+    join(home, '.pyenv', 'shims'), join(home, '.pyenv', 'bin'),
+    join(home, '.local', 'bin'),
+  ];
+  return [...new Set([...base.split(':').filter(Boolean), ...extra])].join(':');
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -61,9 +82,9 @@ export function startNer(cfg) {
 
     // 2) Otherwise launch the bundled spaCy server.
     try {
-      child = spawn('bash', ['run.sh'], {
+      child = spawn(resolveBash(), ['run.sh'], {
         cwd: NER_DIR,
-        env: { ...process.env, PORT: String(port) },
+        env: { ...process.env, PORT: String(port), PATH: enrichedPath() },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (e) {
