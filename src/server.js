@@ -32,7 +32,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.2.1';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -81,6 +81,18 @@ function route(pathname, headers, cfg) {
 
 function pickAgent(model, cfg) {
   return KNOWN_AGENTS.has(model) ? model : cfg.bridge.agent;
+}
+
+// Guard against an api destination pointing back at THIS gateway (loopback host +
+// our own port) — forwarding there would loop forever.
+function isSelfUrl(baseUrl, cfg) {
+  try {
+    const u = new URL(baseUrl);
+    const host = u.hostname.replace(/^\[|\]$/g, '');
+    const loop = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+    const port = u.port || (u.protocol === 'https:' ? '443' : '80');
+    return loop && String(port) === String(cfg.port);
+  } catch { return false; }
 }
 
 async function readBody(req, maxBytes) {
@@ -156,12 +168,19 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
 
 // ---- backend: api ----------------------------------------------------------
 
-async function handleApi(req, res, { adapter, pathname, search, base }, outBody, vault) {
+async function handleApi(req, res, { adapter, pathname, search, base, destKey, destProtocol }, outBody, vault) {
   let upstream;
   try {
+    const headers = forwardHeaders(req.headers, base);
+    // If the destination carries its own key (imported from a configured API),
+    // forward WITH it instead of relying on the client's auth header.
+    if (destKey) {
+      if (destProtocol === 'anthropic') { headers['x-api-key'] = destKey; delete headers.authorization; }
+      else { headers.authorization = `Bearer ${destKey}`; }
+    }
     upstream = await fetch(base.replace(/\/$/, '') + pathname + search, {
       method: req.method,
-      headers: forwardHeaders(req.headers, base),
+      headers,
       body: ['GET', 'HEAD'].includes(req.method) ? undefined : outBody,
     });
   } catch (e) {
@@ -280,7 +299,10 @@ export function createGateway(cfg = loadConfig()) {
     }
     if (dest && dest.type === 'api') {
       if (!dest.baseUrl) return sendJson(res, 502, { error: `destination "${dest.id}" has no baseUrl` });
-      return handleApi(req, res, { ...r, pathname, search: url.search, base: dest.baseUrl }, outBody, vault);
+      if (isSelfUrl(dest.baseUrl, cfg)) {
+        return sendJson(res, 508, { error: { message: `destination "${dest.id}" points back at the gateway (${dest.baseUrl}) — refusing to forward (would loop).`, type: 'loop_detected' } });
+      }
+      return handleApi(req, res, { ...r, pathname, search: url.search, base: dest.baseUrl, destKey: dest.apiKey, destProtocol: dest.protocol }, outBody, vault);
     }
     return handleBridge(req, res, { ...r, pathname, agentOverride: dest?.agent }, body, vault, cfg);
   });

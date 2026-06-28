@@ -73,6 +73,23 @@ test('streaming SSE restores tokens (even split across chunks)', async () => {
   gw.close(); up.close();
 });
 
+test('loop guard: refuses to forward to a destination that is the gateway itself', async () => {
+  const gw = createGateway({
+    host: '127.0.0.1', port: 4320, // self port; destination below points here
+    destinations: [{ id: 'loop', type: 'api', protocol: 'openai', baseUrl: 'http://127.0.0.1:4320/v1', models: ['loopmodel'] }],
+    redaction: { tier: 'basic', dictionary: [], detection: { backend: 'off' } },
+    ner: { autostart: false }, allowedOrigins: [], maxBodyBytes: 1 << 20, logRequests: false,
+  });
+  const port = await listen(gw);
+  const r = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'loopmodel', messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  assert.equal(r.status, 508);
+  assert.match((await r.text()), /loop/i);
+  gw.close();
+});
+
 test('responses (Codex) shape: input + instructions redacted, output restored', async () => {
   let seenBody = null;
   const up = await fakeUpstream((body, req, res) => {

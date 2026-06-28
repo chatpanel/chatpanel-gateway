@@ -29,7 +29,8 @@ export function persistConfig(cfg, path = configPath()) {
 export function publicConfig(cfg, { proUnlocked = false } = {}) {
   return {
     backend: cfg.backend,
-    destinations: Array.isArray(cfg.destinations) ? cfg.destinations : [],
+    // Strip per-destination apiKey (write-only).
+    destinations: (Array.isArray(cfg.destinations) ? cfg.destinations : []).map((d) => { const { apiKey, ...rest } = d; return { ...rest, hasKey: !!apiKey }; }),
     bridge: { url: cfg.bridge?.url, agent: cfg.bridge?.agent, hasToken: !!cfg.bridge?.token },
     upstreams: cfg.upstreams,
     redaction: {
@@ -50,14 +51,22 @@ export function publicConfig(cfg, { proUnlocked = false } = {}) {
 export function applyConfigPatch(cfg, patch = {}) {
   if (patch.backend === 'bridge' || patch.backend === 'api') cfg.backend = patch.backend;
   if (Array.isArray(patch.destinations)) {
+    // Preserve a destination's apiKey when the patch omits it (it's write-only —
+    // publicConfig strips it, so the UI never round-trips it back).
+    const prev = new Map((Array.isArray(cfg.destinations) ? cfg.destinations : []).map((d) => [d.id, d]));
     cfg.destinations = patch.destinations
       .filter((d) => d && typeof d.id === 'string' && (d.type === 'agent' || d.type === 'api'))
-      .map((d) => ({
-        id: d.id, type: d.type,
-        ...(d.type === 'agent' ? { agent: d.agent || d.id } : {}),
-        ...(d.type === 'api' ? { baseUrl: String(d.baseUrl || ''), protocol: d.protocol === 'anthropic' ? 'anthropic' : 'openai' } : {}),
-        models: Array.isArray(d.models) ? d.models.filter((m) => typeof m === 'string' && m) : [],
-      }));
+      .map((d) => {
+        const out = { id: d.id, type: d.type, models: Array.isArray(d.models) ? d.models.filter((m) => typeof m === 'string' && m) : [] };
+        if (d.type === 'agent') out.agent = d.agent || d.id;
+        if (d.type === 'api') {
+          out.baseUrl = String(d.baseUrl || '');
+          out.protocol = d.protocol === 'anthropic' ? 'anthropic' : 'openai';
+          const key = (typeof d.apiKey === 'string' && d.apiKey) ? d.apiKey : prev.get(d.id)?.apiKey;
+          if (key) out.apiKey = key;
+        }
+        return out;
+      });
   }
   if (patch.bridge && typeof patch.bridge === 'object') {
     if (typeof patch.bridge.url === 'string') cfg.bridge.url = patch.bridge.url;
