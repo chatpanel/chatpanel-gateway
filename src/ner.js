@@ -58,17 +58,20 @@ export function startNer(cfg) {
   const n = cfg.ner;
   if (!n || !n.autostart) return null;
 
-  // Respect an explicitly-configured detector — don't relaunch — but still apply
-  // the full-tier bump (else a persisted config with detection-on but tier:basic
-  // would never redact entities even though a detector is available).
+  const port = n.port || 9009;
+  const bundledUrl = `http://127.0.0.1:${port}/ner`;
+
+  // Respect a USER-configured detector pointing elsewhere (a custom NER, a local
+  // LLM) — don't relaunch — but still apply the full-tier bump. If detection is
+  // off OR points at our own bundled NER, fall through and (re)launch/adopt it,
+  // so a persisted "detection→bundled" config doesn't leave NER actually down.
   const det = cfg.redaction?.detection;
-  if (det && det.backend && det.backend !== 'off') {
+  const userDetector = det && det.backend && det.backend !== 'off' && det.url !== bundledUrl;
+  if (userDetector) {
     if (n.enableFullTier && cfg.redaction.tier !== 'full') cfg.redaction.tier = 'full';
-    console.log(`[ner] detection already configured (${det.backend}) — full tier ${cfg.redaction.tier === 'full' ? 'on' : 'off'}`);
+    console.log(`[ner] using configured detector (${det.backend} ${det.url || ''}) — full tier ${cfg.redaction.tier === 'full' ? 'on' : 'off'}`);
     return null;
   }
-
-  const port = n.port || 9009;
   let stopped = false;
   let child = null;
   const ac = new AbortController();

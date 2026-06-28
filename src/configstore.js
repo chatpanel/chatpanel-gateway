@@ -34,7 +34,8 @@ export function publicConfig(cfg, { proUnlocked = false } = {}) {
     redaction: {
       tier: cfg.redaction?.tier,
       redactSystem: cfg.redaction?.redactSystem !== false,
-      detection: cfg.redaction?.detection || { backend: 'off' },
+      // Never echo the detector's apiKey back (write-only, like the tokens).
+      detection: (() => { const { apiKey, ...d } = cfg.redaction?.detection || { backend: 'off' }; return d; })(),
       dictionary: Array.isArray(cfg.redaction?.dictionary) ? cfg.redaction.dictionary : [],
     },
     ner: cfg.ner,
