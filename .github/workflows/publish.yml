@@ -1,13 +1,13 @@
-# Publish chatpanel-gateway to npm via OIDC Trusted Publishing — NO token.
+# Publish @chatpanel/gateway to npm via OIDC Trusted Publishing — NO token.
+# Identical mechanism to @chatpanel/bridge (which publishes this way successfully).
 #
-# One-time setup on npmjs.com: package chatpanel-gateway → Settings → Trusted
-# Publisher → GitHub Actions, repository "chatpanel/chatpanel-gateway", workflow
-# filename "publish.yml". (For the very first publish of a brand-new name you may
-# need one manual `npm publish` after `npm login`, then configure trusted
-# publishing for subsequent automated publishes.)
-#
-# Depends on chatpanel-pii being on npm first (it's a runtime dependency).
-# Version-guarded: an unchanged version just skips.
+# One-time setup on npmjs.com (mirror the working @chatpanel/bridge entry):
+#   package @chatpanel/gateway → Settings → Trusted Publisher → GitHub Actions
+#     Organization or user : chatpanel
+#     Repository           : chatpanel-gateway
+#     Workflow filename    : publish.yml      (just the filename, not the path)
+#     Environment          : (leave blank)
+# Depends on @chatpanel/pii being on npm first. Version-guarded.
 name: Publish to npm
 
 on:
@@ -17,7 +17,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write # OIDC trusted publishing + provenance
+  id-token: write # required for OIDC trusted publishing + provenance
 
 jobs:
   publish:

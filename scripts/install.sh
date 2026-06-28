@@ -10,21 +10,21 @@
 # Needs the ChatPanel Bridge running + logged into codex/claude (backend: bridge).
 set -euo pipefail
 
-REPO="chatpanel/chatpanel-gateway"
 os="$(uname -s)"
 arch="$(uname -m)"
 asset=""
 
 case "$os" in
   Darwin)
-    if [ "$arch" = "arm64" ]; then asset="chatpanel-gateway-macos-arm64"; else asset="chatpanel-gateway-macos-x64"; fi ;;
+    if [ "$arch" = "arm64" ]; then asset="gateway/macos-arm64"; else asset="gateway/macos-x64"; fi ;;
   Linux)
-    asset="chatpanel-gateway-linux-x64" ;;
+    asset="gateway/linux-x64" ;;
   *)
     echo "Unsupported OS ($os). Use:  npx @chatpanel/gateway  (needs Node.js 18+)"; exit 1 ;;
 esac
 
-url="https://github.com/${REPO}/releases/latest/download/${asset}"
+# Served (and counted) by dl.chatpanel.net, which proxies the GitHub release.
+url="https://dl.chatpanel.net/${asset}"
 dest="${HOME}/.local/bin"
 bin="${dest}/chatpanel-gateway"
 mkdir -p "$dest"
