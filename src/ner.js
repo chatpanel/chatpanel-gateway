@@ -124,12 +124,12 @@ export function startNer(cfg) {
     });
 
     // 3) Poll for readiness; wire detection when up.
-    const deadline = Date.now() + 120_000; // generous: first run installs deps
+    const deadline = Date.now() + 300_000; // generous: first run installs deps
     while (Date.now() < deadline && !stopped) {
       if (await nerReachable(port, ac.signal)) { wire('ready'); return; }
       await sleep(1000);
     }
-    if (!stopped) console.log('[ner] not ready after 120s — continuing deterministic-only (run ./ner/run.sh manually to debug).');
+    if (!stopped) console.log('[ner] not ready after 300s — continuing deterministic-only (run ./ner/run.sh manually to debug).');
   })();
 
   const stop = () => {

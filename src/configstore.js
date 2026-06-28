@@ -52,6 +52,16 @@ export function applyConfigPatch(cfg, patch = {}) {
     if (typeof patch.bridge.url === 'string') cfg.bridge.url = patch.bridge.url;
     if (typeof patch.bridge.agent === 'string') cfg.bridge.agent = patch.bridge.agent;
   }
+  // api backend: where redacted traffic is forwarded (the client still picks the
+  // model + sends its own key).
+  if (patch.upstreams && typeof patch.upstreams === 'object') {
+    for (const k of ['openai', 'anthropic']) {
+      const u = patch.upstreams[k];
+      if (u && typeof u.baseUrl === 'string' && u.baseUrl.trim()) {
+        cfg.upstreams[k] = { ...cfg.upstreams[k], baseUrl: u.baseUrl.trim() };
+      }
+    }
+  }
   if (patch.redaction && typeof patch.redaction === 'object') {
     const r = patch.redaction;
     if (r.tier === 'basic' || r.tier === 'full') cfg.redaction.tier = r.tier;
