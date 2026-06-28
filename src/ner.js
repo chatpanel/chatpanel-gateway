@@ -68,7 +68,10 @@ export function startNer(cfg) {
   });
 
   // Poll for readiness without blocking server start; wire detection when up.
+  // `stopped` MUST be declared before the async poller below references it (else a
+  // temporal-dead-zone ReferenceError crashes startup when autostart is on).
   const ac = new AbortController();
+  let stopped = false;
   (async () => {
     const deadline = Date.now() + 120_000; // generous: first run installs deps
     while (Date.now() < deadline && !stopped) {
@@ -88,7 +91,6 @@ export function startNer(cfg) {
     if (!stopped) console.log('[ner] not ready after 120s — continuing deterministic-only (run ./ner/run.sh manually to debug).');
   })();
 
-  let stopped = false;
   const stop = () => {
     if (stopped) return;
     stopped = true;
