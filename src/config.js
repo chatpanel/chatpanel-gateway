@@ -20,6 +20,12 @@ const DEFAULTS = {
   //            BYO keys, OpenRouter, …). Client passes its own auth through.
   backend: 'bridge',
 
+  // Model router: the gateway routes each request to a destination by the model
+  // name the client asks for. Empty = derive destinations from backend/bridge/
+  // upstreams below (back-compat). Each entry:
+  //   { id, type:'agent'|'api', agent?, baseUrl?, protocol?, models:[..] }
+  destinations: [],
+
   // Security: legitimate clients (opencode/pi/codex/SDKs) are local processes that
   // send NO Origin header. A browser always attaches one. So we REJECT any request
   // bearing an Origin not in this allowlist — this stops a malicious web page from

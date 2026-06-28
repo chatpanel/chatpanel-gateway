@@ -20,7 +20,7 @@ async function fakeUpstream(handler) {
 }
 
 const cfg = (openaiBase) => ({
-  host: '127.0.0.1', port: 0,
+  host: '127.0.0.1', port: 0, backend: 'api',
   upstreams: { openai: { baseUrl: openaiBase }, anthropic: { baseUrl: openaiBase } },
   redaction: { tier: 'basic', dictionary: [], detection: { backend: 'off' }, redactSystem: true },
   logRequests: false,

@@ -27,11 +27,12 @@ import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
 import { resolvePro, meter, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, persistConfig, configPath } from './configstore.js';
+import { resolveDestination, aggregateModels } from './router.js';
 import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.1.9';
+export const VERSION = '0.2.0';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -110,17 +111,13 @@ function forwardHeaders(headers, base) {
 
 // ---- backend: bridge -------------------------------------------------------
 
-async function handleBridge(req, res, { kind, adapter, redactable, pathname }, body, vault, cfg) {
+async function handleBridge(req, res, { kind, adapter, redactable, pathname, agentOverride }, body, vault, cfg) {
   if (!redactable) {
-    if (/\/models$/.test(pathname)) {
-      const agents = [...new Set([cfg.bridge.agent, 'codex', 'claude', 'opencode', 'pi'])];
-      return sendJson(res, 200, { object: 'list', data: agents.map((id) => ({ id, object: 'model', owned_by: 'chatpanel-bridge' })) });
-    }
     return sendJson(res, 404, { error: `endpoint ${pathname} not supported by the bridge backend` });
   }
 
   const { messages, system } = adapter.toTurn(body);
-  const agent = pickAgent(body?.model, cfg);
+  const agent = agentOverride || pickAgent(body?.model, cfg);
   const wantStream = body?.stream === true;
   const shaper = shaperFor(kind, body?.model || agent);
   const token = readBridgeToken(cfg.bridge.token);
@@ -235,6 +232,11 @@ export function createGateway(cfg = loadConfig()) {
       return sendJson(res, 200, publicConfig(cfg, { proUnlocked }));
     }
 
+    // Model discovery — aggregate every destination's models.
+    if (req.method === 'GET' && /\/models$/.test(pathname)) {
+      return sendJson(res, 200, aggregateModels(cfg));
+    }
+
     const r = route(pathname, req.headers, cfg);
     let raw;
     try {
@@ -267,17 +269,20 @@ export function createGateway(cfg = loadConfig()) {
         const { vault: v, count } = await redactSegments(segs, cfg.redaction, { signal: ac.signal, isPro });
         vault = v;
         outBody = Buffer.from(JSON.stringify(body), 'utf8');
-        if (cfg.logRequests) console.log(`[gateway] ${req.method} ${pathname} · redacted ${count}/${segs.length} segment(s) · ${cfg.backend}`);
       }
-    } else if (cfg.logRequests) {
-      console.log(`[gateway] ${req.method} ${pathname} · ${cfg.backend}`);
     }
 
-    if (cfg.backend === 'bridge') {
-      return handleBridge(req, res, { ...r, pathname }, body, vault, cfg);
+    // Route by the requested model → a destination (agent via the bridge, or an
+    // API we forward to). Falls back to the legacy backend when none configured.
+    const dest = resolveDestination(body?.model, cfg, r.kind);
+    if (cfg.logRequests) {
+      console.log(`[gateway] ${req.method} ${pathname} · model=${body?.model || '-'} → ${dest ? `${dest.id}(${dest.type})` : 'none'}`);
     }
-    if (!r.base) return sendJson(res, 502, { error: 'no upstream configured' });
-    return handleApi(req, res, { ...r, pathname, search: url.search }, outBody, vault);
+    if (dest && dest.type === 'api') {
+      if (!dest.baseUrl) return sendJson(res, 502, { error: `destination "${dest.id}" has no baseUrl` });
+      return handleApi(req, res, { ...r, pathname, search: url.search, base: dest.baseUrl }, outBody, vault);
+    }
+    return handleBridge(req, res, { ...r, pathname, agentOverride: dest?.agent }, body, vault, cfg);
   });
 }
 

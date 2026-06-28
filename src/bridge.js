@@ -45,6 +45,28 @@ export function toBridgeMessages(messages) {
     .map((m) => ({ role: m.role, content: flattenContent(m.content) }));
 }
 
+// Open a bridge /chat stream WITH tool specs (pageTools), returning the raw fetch
+// Response so the tool-relay can hold the reader open across the OpenAI round-trip.
+export async function openBridgeChat({ bridgeUrl, agent, token, messages, system, specs, options, signal }) {
+  const res = await fetch(`${bridgeUrl.replace(/\/$/, '')}/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify({
+      agent,
+      messages: toBridgeMessages(messages),
+      system: system || '',
+      options: options || {},
+      ...(Array.isArray(specs) && specs.length ? { pageTools: { specs } } : {}),
+    }),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`bridge /chat HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`);
+  }
+  return res;
+}
+
 // Stream a turn through the bridge. Calls onText(restorableChunk) for each delta
 // of model text and returns the full (un-restored) text. Throws on bridge error.
 export async function streamBridgeChat({ bridgeUrl, agent, token, messages, system, options, signal }, onText) {

@@ -29,6 +29,7 @@ export function persistConfig(cfg, path = configPath()) {
 export function publicConfig(cfg, { proUnlocked = false } = {}) {
   return {
     backend: cfg.backend,
+    destinations: Array.isArray(cfg.destinations) ? cfg.destinations : [],
     bridge: { url: cfg.bridge?.url, agent: cfg.bridge?.agent, hasToken: !!cfg.bridge?.token },
     upstreams: cfg.upstreams,
     redaction: {
@@ -48,6 +49,16 @@ export function publicConfig(cfg, { proUnlocked = false } = {}) {
 // Merge an editable patch into the live cfg. Only known fields; ignores the rest.
 export function applyConfigPatch(cfg, patch = {}) {
   if (patch.backend === 'bridge' || patch.backend === 'api') cfg.backend = patch.backend;
+  if (Array.isArray(patch.destinations)) {
+    cfg.destinations = patch.destinations
+      .filter((d) => d && typeof d.id === 'string' && (d.type === 'agent' || d.type === 'api'))
+      .map((d) => ({
+        id: d.id, type: d.type,
+        ...(d.type === 'agent' ? { agent: d.agent || d.id } : {}),
+        ...(d.type === 'api' ? { baseUrl: String(d.baseUrl || ''), protocol: d.protocol === 'anthropic' ? 'anthropic' : 'openai' } : {}),
+        models: Array.isArray(d.models) ? d.models.filter((m) => typeof m === 'string' && m) : [],
+      }));
+  }
   if (patch.bridge && typeof patch.bridge === 'object') {
     if (typeof patch.bridge.url === 'string') cfg.bridge.url = patch.bridge.url;
     if (typeof patch.bridge.agent === 'string') cfg.bridge.agent = patch.bridge.agent;
