@@ -32,7 +32,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.2.2';
+export const VERSION = '0.2.3';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -66,6 +66,14 @@ function setCors(res, origin) {
 }
 
 const STARTED_AT = Date.now();
+
+// In-memory ring of recent request SUMMARIES for the extension's monitoring view.
+// Counts only — never any prompt/response text or values.
+const recentRequests = [];
+function recordRequest(entry) {
+  recentRequests.push(entry);
+  if (recentRequests.length > 50) recentRequests.shift();
+}
 
 // Classify a request: which protocol kind + adapter, whether it's a redactable
 // chat endpoint, and (api backend) which upstream base URL.
@@ -237,6 +245,9 @@ export function createGateway(cfg = loadConfig()) {
         uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
       });
     }
+    if (pathname === '/logs' && req.method === 'GET') {
+      return sendJson(res, 200, { entries: [...recentRequests].reverse() }); // newest first; counts only
+    }
     if (pathname === '/config' && req.method === 'GET') {
       const proUnlocked = await resolvePro(cfg.pro?.entitlementToken);
       return sendJson(res, 200, publicConfig(cfg, { proUnlocked }));
@@ -270,6 +281,7 @@ export function createGateway(cfg = loadConfig()) {
     let vault = null;
     let body = null;
     let outBody = raw;
+    let redactedCount = 0;
     if (r.redactable && req.method === 'POST' && raw.length) {
       try { body = JSON.parse(raw.toString('utf8')); } catch { body = null; }
       if (body) {
@@ -287,6 +299,7 @@ export function createGateway(cfg = loadConfig()) {
         req.on('close', () => ac.abort());
         const { vault: v, count } = await redactSegments(segs, cfg.redaction, { signal: ac.signal, isPro });
         vault = v;
+        redactedCount = count;
         outBody = Buffer.from(JSON.stringify(body), 'utf8');
       }
     }
@@ -294,8 +307,9 @@ export function createGateway(cfg = loadConfig()) {
     // Route by the requested model → a destination (agent via the bridge, or an
     // API we forward to). Falls back to the legacy backend when none configured.
     const dest = resolveDestination(body?.model, cfg, r.kind);
-    if (cfg.logRequests) {
-      console.log(`[gateway] ${req.method} ${pathname} · model=${body?.model || '-'} → ${dest ? `${dest.id}(${dest.type})` : 'none'}`);
+    if (cfg.logRequests && r.redactable) {
+      recordRequest({ t: Date.now(), model: body?.model || null, dest: dest ? dest.id : null, type: dest ? dest.type : null, redacted: redactedCount });
+      console.log(`[gateway] ${req.method} ${pathname} · model=${body?.model || '-'} → ${dest ? `${dest.id}(${dest.type})` : 'none'} · redacted ${redactedCount}`);
     }
     if (dest && dest.type === 'api') {
       if (!dest.baseUrl) return sendJson(res, 502, { error: `destination "${dest.id}" has no baseUrl` });
