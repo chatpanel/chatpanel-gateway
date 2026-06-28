@@ -21,7 +21,7 @@ import { createServer } from 'node:http';
 import { loadConfig } from './config.js';
 import { redactSegments } from './redact.js';
 import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer } from './stream.js';
-import { restoreText, effectiveTier, gatedDictionary, narrowSpecs, makeToolHarness } from '@chatpanel/pii';
+import { restoreText, effectiveTier, gatedDictionary, narrowSpecs, makeToolHarness, placeholderToolNote } from '@chatpanel/pii';
 import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
 import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
 import { shaperFor } from './shape.js';
@@ -33,7 +33,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.5.0';
+export const VERSION = '0.5.1';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -208,9 +208,14 @@ async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, 
   const redactOpts = { tier: effectiveTier({ tier: cfg.redaction.tier }, isPro), dictionary: gatedDictionary(cfg.redaction, isPro), entities: [] };
   const s = createRelaySession({ vault, redactOpts, bridgeUrl: cfg.bridge.url, token, harness });
   const ttl = setTimeout(() => endRelaySession(s.id), 135_000); // bridge tool-call timeout is 120s
+  // Tell the agent placeholders are auto-restored for tools, so privacy-aware agents
+  // (Codex/Claude) USE them instead of refusing. Appended after redaction.
+  const sysWithNote = (vault && tools?.length)
+    ? `${system || ''}\n\n${placeholderToolNote({ toolData: cfg.tools?.toolData })}`.trim()
+    : system;
   let resp;
   try {
-    resp = await openBridgeChat({ bridgeUrl: cfg.bridge.url, agent, token, messages, system, specs: toolsToSpecs(tools), options: {}, signal: undefined });
+    resp = await openBridgeChat({ bridgeUrl: cfg.bridge.url, agent, token, messages, system: sysWithNote, specs: toolsToSpecs(tools), options: {}, signal: undefined });
   } catch (e) { clearTimeout(ttl); endRelaySession(s.id); return sendJson(res, 502, { error: { message: `bridge: ${e.message}`, type: 'bridge_error' } }); }
   s.reader = resp.body.getReader();
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
