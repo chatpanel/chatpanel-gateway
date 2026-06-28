@@ -17,6 +17,9 @@ export function persistConfig(cfg, path = configPath()) {
   mkdirSync(dirname(path), { recursive: true });
   const out = {
     host: cfg.host, port: cfg.port, backend: cfg.backend,
+    // Destinations (the configured agents + API models) MUST persist — otherwise a
+    // restart drops them and every model falls back to the default OpenAI upstream.
+    destinations: cfg.destinations,
     bridge: cfg.bridge, upstreams: cfg.upstreams, redaction: cfg.redaction,
     ner: cfg.ner, allowedOrigins: cfg.allowedOrigins, maxBodyBytes: cfg.maxBodyBytes,
     pro: cfg.pro, logRequests: cfg.logRequests, tools: cfg.tools,
