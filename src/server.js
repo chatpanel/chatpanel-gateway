@@ -33,7 +33,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.4.2';
+export const VERSION = '0.4.3';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -148,6 +148,28 @@ async function readBody(req, maxBytes) {
 function sendJson(res, status, obj) {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(obj));
+}
+
+// The detector URL (…:9009/ner) and its sibling /health. Returns null when no
+// detector is wired (deterministic-only).
+function nerBaseUrl(cfg) {
+  const url = cfg.redaction?.detection?.url;
+  if (!url || cfg.redaction?.detection?.backend === 'off') return null;
+  return url;
+}
+
+// Live health probe of the bundled/configured NER (GET /health → { ok, model }).
+async function probeNerHealth(cfg) {
+  const url = nerBaseUrl(cfg);
+  if (!url) return { configured: false, ok: false, url: null, model: null };
+  try {
+    const r = await fetch(url.replace(/\/ner\/?$/, '') + '/health', { signal: AbortSignal.timeout(2000) });
+    if (!r.ok) return { configured: true, ok: false, url, model: null };
+    const j = await r.json().catch(() => ({}));
+    return { configured: true, ok: true, url, model: j.model || null };
+  } catch {
+    return { configured: true, ok: false, url, model: null };
+  }
 }
 
 function forwardHeaders(headers, base) {
@@ -330,13 +352,40 @@ export function createGateway(cfg = loadConfig()) {
     // --- Config API (the extension's "Gateway" tab is a client of these) ---
     if (pathname === '/status' && req.method === 'GET') {
       const proUnlocked = await resolvePro(cfg.pro?.entitlementToken);
-      const nerOn = cfg.redaction?.detection?.backend && cfg.redaction.detection.backend !== 'off';
+      const health = await probeNerHealth(cfg); // live GET /health on the detector
       return sendJson(res, 200, {
         ok: true, version: VERSION, backend: cfg.backend, tier: cfg.redaction.tier,
-        ner: { autostart: !!cfg.ner?.autostart, ready: !!nerOn },
+        ner: {
+          autostart: !!cfg.ner?.autostart,
+          configured: health.configured,
+          ready: health.ok,            // the detector actually answered /health
+          model: health.model,         // e.g. "en_core_web_sm"
+          url: health.url,
+        },
         pro: { unlocked: proUnlocked }, usage: usage(cfg),
         uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
       });
+    }
+    // Proxy the detector so it's checkable on the gateway's own port (the NER runs
+    // on its own port, e.g. 9009 — hitting :4320/ner used to 404). GET → health.
+    if (pathname === '/ner') {
+      const url = nerBaseUrl(cfg);
+      if (!url) return sendJson(res, 503, { error: { message: 'NER not configured — deterministic-only redaction', type: 'ner_off' } });
+      if (req.method === 'GET') {
+        const health = await probeNerHealth(cfg);
+        return sendJson(res, health.ok ? 200 : 503, health);
+      }
+      if (req.method === 'POST') {
+        try {
+          const body = await readBody(req, cfg.maxBodyBytes);
+          const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(8000) });
+          const text = await r.text();
+          res.writeHead(r.status, { 'content-type': 'application/json' });
+          return res.end(text);
+        } catch (e) {
+          return sendJson(res, 502, { error: { message: `NER unreachable: ${e.message}`, type: 'ner_unreachable' } });
+        }
+      }
     }
     if (pathname === '/logs' && req.method === 'GET') {
       return sendJson(res, 200, { entries: [...recentRequests].reverse() }); // newest first; counts only
