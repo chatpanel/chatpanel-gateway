@@ -71,12 +71,12 @@ const STARTED_AT = Date.now();
 // chat endpoint, and (api backend) which upstream base URL.
 function route(pathname, headers, cfg) {
   if (anthropic.matches(pathname) || 'anthropic-version' in headers) {
-    return { kind: 'anthropic', adapter: anthropic, redactable: anthropic.matches(pathname), base: cfg.upstreams.anthropic.baseUrl };
+    return { kind: 'anthropic', adapter: anthropic, redactable: anthropic.matches(pathname), base: cfg.upstreams?.anthropic?.baseUrl };
   }
   if (responses.matches(pathname)) {
-    return { kind: 'responses', adapter: responses, redactable: true, base: cfg.upstreams.openai.baseUrl };
+    return { kind: 'responses', adapter: responses, redactable: true, base: cfg.upstreams?.openai?.baseUrl };
   }
-  return { kind: 'openai', adapter: openai, redactable: openai.matches(pathname), base: cfg.upstreams.openai.baseUrl };
+  return { kind: 'openai', adapter: openai, redactable: openai.matches(pathname), base: cfg.upstreams?.openai?.baseUrl };
 }
 
 function pickAgent(model, cfg) {
