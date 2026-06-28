@@ -21,7 +21,7 @@ case "$os" in
   Linux)
     asset="chatpanel-gateway-linux-x64" ;;
   *)
-    echo "Unsupported OS ($os). Use:  npx chatpanel-gateway  (needs Node.js 18+)"; exit 1 ;;
+    echo "Unsupported OS ($os). Use:  npx @chatpanel/gateway  (needs Node.js 18+)"; exit 1 ;;
 esac
 
 url="https://github.com/${REPO}/releases/latest/download/${asset}"

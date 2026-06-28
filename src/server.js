@@ -21,7 +21,7 @@ import { createServer } from 'node:http';
 import { loadConfig } from './config.js';
 import { redactSegments } from './redact.js';
 import { pipeRestoredStream, makeTokenRestorer } from './stream.js';
-import { restoreText } from 'chatpanel-pii';
+import { restoreText } from '@chatpanel/pii';
 import { streamBridgeChat, readBridgeToken } from './bridge.js';
 import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';

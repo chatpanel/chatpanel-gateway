@@ -8,7 +8,7 @@
 // mapping is self-consistent within the request. (Same reasoning as the
 // extension's pii-pipeline.)
 
-import { createVault, redactText, detectEntities, effectiveTier, gatedDictionary } from 'chatpanel-pii';
+import { createVault, redactText, detectEntities, effectiveTier, gatedDictionary } from '@chatpanel/pii';
 
 // tier: 'basic' | 'full'. For 'full' we run the local detector over the combined
 // text to harvest names/orgs, then redact every segment against that entity set.

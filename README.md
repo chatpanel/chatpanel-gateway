@@ -34,7 +34,7 @@ Two backends (config `backend`):
   the gateway stores no keys.
 
 The redaction engine is the **same code** the ChatPanel extension runs — the
-[`chatpanel-pii`](https://github.com/chatpanel/chatpanel-pii) package is the
+[`@chatpanel/pii`](https://github.com/chatpanel/chatpanel-pii) package is the
 single source of truth, so a privacy feature added once is shared everywhere.
 
 ## Quick start (bridge backend)
@@ -43,7 +43,7 @@ You need the [ChatPanel bridge](https://github.com/chatpanel/chatpanel-bridge)
 running and logged into codex/claude (the same bridge the extension uses).
 
 ```bash
-npm install -g chatpanel-gateway
+npm install -g @chatpanel/gateway
 chatpanel-gateway
 # → ChatPanel Privacy Gateway v0.1.0 on http://127.0.0.1:4320
 #     backend  : bridge (agent: codex, via http://127.0.0.1:4319)
@@ -129,7 +129,7 @@ restores cleanly.
 The [extension](https://github.com/chatpanel/chatpanel-extension) redacts inside
 the browser; the [bridge](https://github.com/chatpanel/chatpanel-bridge) lets the
 browser drive local CLI agents. This gateway reuses the bridge to put the **same
-redaction engine** ([`chatpanel-pii`](https://github.com/chatpanel/chatpanel-pii))
+redaction engine** ([`@chatpanel/pii`](https://github.com/chatpanel/chatpanel-pii))
 in front of *any* agent — so non-browser tools get the privacy too, and the
 agent's own multi-turn loop is blinded, not just the first prompt.
 

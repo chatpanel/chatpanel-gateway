@@ -12,7 +12,7 @@
 // agent unchanged — its defined "permanent substitution" behavior. Only reversible
 // [[TYPE_n]] tokens are restored here.
 
-import { restoreText } from 'chatpanel-pii';
+import { restoreText } from '@chatpanel/pii';
 
 // Returns a TransformStream-free chunk transformer: feed it decoded string chunks,
 // it returns the prefix that's safe to forward now and buffers a possibly-partial
