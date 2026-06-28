@@ -13,7 +13,8 @@
   "scripts": {
     "start": "node bin/chatpanel-gateway.js",
     "test": "node --test",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "build:bin": "bash scripts/build-binaries.sh"
   },
   "files": [
     "src",
@@ -27,7 +28,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "chatpanel-pii": "file:../chatpanel-pii"
+    "chatpanel-pii": "^0.1.0"
   },
   "homepage": "https://chatpanel.net",
   "repository": {

@@ -4,3 +4,4 @@ dist/
 .DS_Store
 .env
 gateway.config.json
+package-lock.json

@@ -1,0 +1,77 @@
+# Compile the gateway into standalone binaries and attach them to the GitHub
+# Release, so users can install a single file (no Node needed) via scripts/install.sh.
+#
+# Trigger by pushing a tag like `v0.1.0`. Each platform builds on its OWN native
+# runner. The gateway depends on chatpanel-pii, so it must be on npm first
+# (`npm ci` pulls it). The bundled spaCy NER (ner/) is NOT embedded — binary
+# installs fall open to deterministic redaction.
+name: Release binaries
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Create the release (once)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Standalone ChatPanel Privacy Gateway binaries — no Node.js required.
+
+          **Install (macOS/Linux):**
+          \`curl -fsSL https://raw.githubusercontent.com/chatpanel/chatpanel-gateway/main/scripts/install.sh | bash\`
+
+          Or run a downloaded binary once to start at login:
+          \`chmod +x chatpanel-gateway-* && ./chatpanel-gateway-* --install\`
+
+          ⚠️ Not yet code-signed, so macOS Gatekeeper / Windows SmartScreen may warn
+          on first run (macOS: right-click → Open). Signing is coming." \
+            || echo "Release ${GITHUB_REF_NAME} already exists — continuing."
+
+  build:
+    needs: create-release
+    if: ${{ always() && needs.create-release.result != 'failure' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            out: chatpanel-gateway-linux-x64
+          - os: macos-14
+            out: chatpanel-gateway-macos-arm64
+          - os: windows-latest
+            out: chatpanel-gateway-windows-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci --omit=dev || npm install --omit=dev
+      - uses: oven-sh/setup-bun@v2
+      - name: Build ${{ matrix.out }}
+        shell: bash
+        run: |
+          mkdir -p dist
+          bun build bin/chatpanel-gateway.js --compile --outfile "dist/${{ matrix.out }}"
+      - name: Ad-hoc sign (macOS)
+        if: runner.os == 'macOS'
+        run: codesign --force --sign - "dist/${{ matrix.out }}"
+      - name: Upload ${{ matrix.out }} to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "${GITHUB_REF_NAME}" "dist/${{ matrix.out }}" --clobber

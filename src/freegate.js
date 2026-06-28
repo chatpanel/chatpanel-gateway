@@ -12,6 +12,11 @@ import { isProEntitled } from './entitlement.js';
 const proCache = { token: null, val: false };
 const counts = { day: '', n: 0 };
 
+// Today's metered usage — for the gateway's /status (the extension's monitoring).
+export function usage(cfg) {
+  return { day: counts.day, used: counts.n, cap: cfg.pro?.free?.maxRequestsPerDay ?? 25 };
+}
+
 export async function resolvePro(token) {
   if (!token) return false;
   if (proCache.token === token) return proCache.val;

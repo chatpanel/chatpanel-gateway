@@ -1,0 +1,55 @@
+# Publish chatpanel-gateway to npm via OIDC Trusted Publishing — NO token.
+#
+# One-time setup on npmjs.com: package chatpanel-gateway → Settings → Trusted
+# Publisher → GitHub Actions, repository "chatpanel/chatpanel-gateway", workflow
+# filename "publish.yml". (For the very first publish of a brand-new name you may
+# need one manual `npm publish` after `npm login`, then configure trusted
+# publishing for subsequent automated publishes.)
+#
+# Depends on chatpanel-pii being on npm first (it's a runtime dependency).
+# Version-guarded: an unchanged version just skips.
+name: Publish to npm
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC trusted publishing + provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: VERSION constant must match package.json
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          SRC=$(node -e "console.log((require('fs').readFileSync('src/server.js','utf8').match(/VERSION = '([^']+)'/)||[])[1]||'')")
+          echo "package.json=$PKG  server.js=$SRC"
+          if [ "$PKG" != "$SRC" ]; then
+            echo "::error::VERSION in src/server.js ($SRC) != package.json ($PKG). Bump both."
+            exit 1
+          fi
+
+      - name: Ensure npm supports trusted publishing (>= 11.5.1)
+        run: npm install -g npm@latest
+
+      - name: Publish if the version is new
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VER" version >/dev/null 2>&1; then
+            echo "$NAME@$VER already on npm — bump the version to publish."
+          else
+            npm publish --provenance --access public
+            echo "Published $NAME@$VER"
+          fi

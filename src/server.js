@@ -25,7 +25,8 @@ import { restoreText } from 'chatpanel-pii';
 import { streamBridgeChat, readBridgeToken } from './bridge.js';
 import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
-import { resolvePro, meter } from './freegate.js';
+import { resolvePro, meter, usage } from './freegate.js';
+import { publicConfig, applyConfigPatch, persistConfig, configPath } from './configstore.js';
 import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
@@ -45,12 +46,25 @@ function isLoopbackHost(host) {
   return name === 'localhost' || name === '127.0.0.1' || name === '::1';
 }
 
-// Local CLI clients send no Origin; browsers always do. Reject any Origin not
-// explicitly allowlisted so a web page can't drive the gateway (and thus codex).
+// Local CLI clients send no Origin; browsers always do. We allow the trusted
+// local UIs (the ChatPanel extension + localhost) and anything the operator
+// allowlists — and reject every other web origin, so a malicious page can't drive
+// the gateway (and thus codex). Mirrors the bridge's origin model.
 function originAllowed(origin, cfg) {
-  if (!origin) return true; // no Origin → a local process, not a browser page
+  if (!origin) return true; // no Origin → a local process (opencode/codex/SDK)
+  if (/^chrome-extension:\/\//.test(origin) || /^moz-extension:\/\//.test(origin)) return true;
+  if (/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin)) return true;
   return Array.isArray(cfg.allowedOrigins) && cfg.allowedOrigins.includes(origin);
 }
+
+function setCors(res, origin) {
+  res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-ChatPanel-Token');
+  res.setHeader('Vary', 'Origin');
+}
+
+const STARTED_AT = Date.now();
 
 // Classify a request: which protocol kind + adapter, whether it's a redactable
 // chat endpoint, and (api backend) which upstream base URL.
@@ -188,8 +202,37 @@ export function createGateway(cfg = loadConfig()) {
     if (!isLoopbackHost(req.headers.host)) return sendJson(res, 403, { error: 'loopback only' });
     if (!originAllowed(req.headers.origin, cfg)) return sendJson(res, 403, { error: 'origin not allowed' });
 
+    // CORS for the trusted local UIs (extension/localhost). Preflight ends here.
+    if (req.headers.origin) setCors(res, req.headers.origin);
+    if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+
     if (req.method === 'GET' && pathname === '/health') {
       return sendJson(res, 200, { ok: true, version: VERSION, backend: cfg.backend, tier: cfg.redaction.tier });
+    }
+
+    // --- Config API (the extension's "Gateway" tab is a client of these) ---
+    if (pathname === '/status' && req.method === 'GET') {
+      const proUnlocked = await resolvePro(cfg.pro?.entitlementToken);
+      const nerOn = cfg.redaction?.detection?.backend && cfg.redaction.detection.backend !== 'off';
+      return sendJson(res, 200, {
+        ok: true, version: VERSION, backend: cfg.backend, tier: cfg.redaction.tier,
+        ner: { autostart: !!cfg.ner?.autostart, ready: !!nerOn },
+        pro: { unlocked: proUnlocked }, usage: usage(cfg),
+        uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
+      });
+    }
+    if (pathname === '/config' && req.method === 'GET') {
+      const proUnlocked = await resolvePro(cfg.pro?.entitlementToken);
+      return sendJson(res, 200, publicConfig(cfg, { proUnlocked }));
+    }
+    if (pathname === '/config' && req.method === 'POST') {
+      let patch = null;
+      try { patch = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')); } catch { patch = null; }
+      if (!patch || typeof patch !== 'object') return sendJson(res, 400, { error: 'invalid config patch' });
+      applyConfigPatch(cfg, patch);
+      try { persistConfig(cfg, configPath()); } catch (e) { return sendJson(res, 500, { error: `could not persist config: ${e.message}` }); }
+      const proUnlocked = await resolvePro(cfg.pro?.entitlementToken);
+      return sendJson(res, 200, publicConfig(cfg, { proUnlocked }));
     }
 
     const r = route(pathname, req.headers, cfg);
