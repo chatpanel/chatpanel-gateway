@@ -20,7 +20,7 @@
 import { createServer } from 'node:http';
 import { loadConfig } from './config.js';
 import { redactSegments } from './redact.js';
-import { pipeRestoredStream, makeTokenRestorer } from './stream.js';
+import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer } from './stream.js';
 import { restoreText, effectiveTier, gatedDictionary } from '@chatpanel/pii';
 import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
 import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
@@ -33,7 +33,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.3.0';
+export const VERSION = '0.3.1';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -236,7 +236,7 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
 
 // ---- backend: api ----------------------------------------------------------
 
-async function handleApi(req, res, { adapter, pathname, search, base, destKey, destProtocol }, outBody, vault) {
+async function handleApi(req, res, { adapter, kind, pathname, search, base, destKey, destProtocol }, outBody, vault) {
   let upstream;
   try {
     const headers = forwardHeaders(req.headers, base);
@@ -261,7 +261,10 @@ async function handleApi(req, res, { adapter, pathname, search, base, destKey, d
 
   if (ct.includes('text/event-stream') && upstream.body) {
     res.writeHead(upstream.status, resHeaders);
-    return pipeRestoredStream(upstream.body, res, vault);
+    // OpenAI streaming: restore tool-call args with real values (aliases undone)
+    // while keeping visible text pseudonymized. Other protocols: generic restore.
+    const pipe = kind === 'openai' ? pipeRestoredOpenAIStream : pipeRestoredStream;
+    return pipe(upstream.body, res, vault);
   }
 
   const buf = Buffer.from(await upstream.arrayBuffer());

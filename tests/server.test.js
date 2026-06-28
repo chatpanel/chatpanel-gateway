@@ -73,6 +73,34 @@ test('streaming SSE restores tokens (even split across chunks)', async () => {
   gw.close(); up.close();
 });
 
+test('api: tool-call args get the REAL value (pseudonym undone), visible text keeps the pseudonym', async () => {
+  let seen = null;
+  const up = await fakeUpstream((body, req, res) => {
+    seen = body; // upstream sees the pseudonymized prompt
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'You are Twinkle.',
+      tool_calls: [{ id: 'c1', type: 'function', function: { name: 'search', arguments: JSON.stringify({ q: 'president Twinkle' }) } }] }, finish_reason: 'tool_calls' }] }));
+  });
+  const gw = createGateway({
+    host: '127.0.0.1', port: 0, backend: 'api',
+    upstreams: { openai: { baseUrl: `http://127.0.0.1:${up.port}` }, anthropic: {} },
+    redaction: { tier: 'basic', dictionary: [{ value: 'John', alias: 'Twinkle' }], detection: { backend: 'off' }, redactSystem: true },
+    ner: { autostart: false }, allowedOrigins: [], maxBodyBytes: 1 << 20, logRequests: false,
+  });
+  const port = await listen(gw);
+  const r = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: 'I am John' }] }),
+  });
+  const j = await r.json();
+  assert.doesNotMatch(seen, /John/, 'upstream model only sees the pseudonym');
+  assert.match(j.choices[0].message.content, /Twinkle/, 'visible text keeps the pseudonym');
+  const args = j.choices[0].message.tool_calls[0].function.arguments;
+  assert.match(args, /John/, 'tool args get the REAL value');
+  assert.doesNotMatch(args, /Twinkle/);
+  gw.close(); up.close();
+});
+
 test('loop guard: refuses to forward to a destination that is the gateway itself', async () => {
   const gw = createGateway({
     host: '127.0.0.1', port: 4320, // self port; destination below points here

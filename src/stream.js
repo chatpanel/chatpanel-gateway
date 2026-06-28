@@ -12,7 +12,7 @@
 // agent unchanged — its defined "permanent substitution" behavior. Only reversible
 // [[TYPE_n]] tokens are restored here.
 
-import { restoreText } from '@chatpanel/pii';
+import { restoreText, restoreWithAliases } from '@chatpanel/pii';
 
 // Returns a TransformStream-free chunk transformer: feed it decoded string chunks,
 // it returns the prefix that's safe to forward now and buffers a possibly-partial
@@ -58,6 +58,97 @@ export function restoreDeep(value, vault) {
     return out;
   }
   return value;
+}
+
+// Deep-restore for tool-call argument values (non-stream), undoing aliases too —
+// so a client running tools LOCALLY gets the REAL value (pseudonyms included),
+// while the model stays blinded. Mirrors the extension's restoreDeep.
+export function restoreDeepAliases(value, vault) {
+  if (!vault) return value;
+  if (typeof value === 'string') return restoreWithAliases(value, vault);
+  if (Array.isArray(value)) return value.map((v) => restoreDeepAliases(v, vault));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const k of Object.keys(value)) out[k] = restoreDeepAliases(value[k], vault);
+    return out;
+  }
+  return value;
+}
+
+// A per-field tail-buffered restorer (holds a partial trailing [[token). `restoreFn`
+// is restoreText for VISIBLE text (keep pseudonyms) or restoreWithAliases for
+// TOOL-CALL args (real values).
+function makeFieldRestorer(vault, restoreFn) {
+  let buf = '';
+  return {
+    push(chunk) {
+      buf += chunk || '';
+      const open = buf.lastIndexOf('[[');
+      let safe;
+      if (open !== -1 && !buf.slice(open).includes(']]')) { safe = buf.slice(0, open); buf = buf.slice(open); }
+      else { safe = buf; buf = ''; }
+      return restoreFn(safe, vault);
+    },
+    flush() { const out = restoreFn(buf, vault); buf = ''; return out; },
+  };
+}
+
+// OpenAI streaming restorer that restores VISIBLE content with restoreText (the
+// model + user keep the pseudonym) but TOOL-CALL argument deltas with
+// restoreWithAliases (the client runs the tool on the REAL value). Passes through
+// any non-JSON event untouched.
+export async function pipeRestoredOpenAIStream(upstreamBody, nodeRes, vault) {
+  const reader = upstreamBody.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  const contentR = makeFieldRestorer(vault, restoreText);
+  const argRs = new Map(); // tool_call index -> field restorer (aliases)
+
+  const handleBlock = (block) => {
+    const out = [];
+    for (const line of block.split('\n')) {
+      if (!line.startsWith('data:')) { out.push(line); continue; }
+      const payload = line.slice(5).replace(/^\s/, '');
+      if (!payload) { out.push(line); continue; }
+      if (payload === '[DONE]') {
+        const tail = contentR.flush();
+        if (tail) out.push(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: tail }, finish_reason: null }] })}`);
+        out.push(line);
+        continue;
+      }
+      let evt; try { evt = JSON.parse(payload); } catch { out.push(line); continue; }
+      for (const choice of evt.choices || []) {
+        const d = choice.delta;
+        if (!d) continue;
+        if (typeof d.content === 'string') d.content = contentR.push(d.content);
+        for (const tc of d.tool_calls || []) {
+          const idx = typeof tc.index === 'number' ? tc.index : 0;
+          if (tc.function && typeof tc.function.arguments === 'string') {
+            if (!argRs.has(idx)) argRs.set(idx, makeFieldRestorer(vault, restoreWithAliases));
+            tc.function.arguments = argRs.get(idx).push(tc.function.arguments);
+          }
+        }
+      }
+      out.push(`data: ${JSON.stringify(evt)}`);
+    }
+    return out.join('\n');
+  };
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) !== -1) {
+        nodeRes.write(handleBlock(buf.slice(0, i)) + '\n\n');
+        buf = buf.slice(i + 2);
+      }
+    }
+    if (buf) nodeRes.write(handleBlock(buf));
+  } finally {
+    nodeRes.end();
+  }
 }
 
 // Pipe a fetch Response body (web ReadableStream) through the restorer into a

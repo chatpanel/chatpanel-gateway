@@ -3,8 +3,9 @@
 // request body as in-place segments, and restores tokens in a non-streaming
 // response. (Streaming is restored generically in stream.js.)
 
+import { restoreText } from '@chatpanel/pii';
 import { segment } from './redact.js';
-import { restoreDeep } from './stream.js';
+import { restoreDeepAliases } from './stream.js';
 
 export function matches(pathname) {
   return /\/chat\/completions$/.test(pathname) || /\/completions$/.test(pathname);
@@ -58,10 +59,12 @@ export function restoreResponse(json, vault) {
   for (const choice of json?.choices || []) {
     const msg = choice?.message;
     if (!msg) continue;
-    if (typeof msg.content === 'string') msg.content = restoreDeep(msg.content, vault);
+    // Visible text keeps the pseudonym (restoreText); tool-call args get the REAL
+    // value (restoreDeepAliases) so the client runs the tool on real data.
+    if (typeof msg.content === 'string') msg.content = restoreText(msg.content, vault);
     for (const tc of msg.tool_calls || []) {
       if (tc?.function && typeof tc.function.arguments === 'string') {
-        tc.function.arguments = restoreDeep(tc.function.arguments, vault);
+        tc.function.arguments = restoreDeepAliases(tc.function.arguments, vault);
       }
     }
   }
