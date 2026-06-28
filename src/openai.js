@@ -11,6 +11,16 @@ export function matches(pathname) {
   return /\/chat\/completions$/.test(pathname) || /\/completions$/.test(pathname);
 }
 
+// Append a (non-redacted) instruction to the system prompt — e.g. the placeholder
+// note that tells the model placeholders are auto-restored for tools.
+export function injectSystemNote(body, note) {
+  if (!note || !body || !Array.isArray(body.messages)) return body;
+  const sys = body.messages.find((m) => m && m.role === 'system');
+  if (sys && typeof sys.content === 'string') sys.content += `\n\n${note}`;
+  else body.messages.unshift({ role: 'system', content: note });
+  return body;
+}
+
 // Collect segments from messages[].content (string or multimodal parts). System
 // messages are included unless redactSystem is false.
 export function collectSegments(body, redactionCfg) {

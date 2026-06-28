@@ -9,6 +9,15 @@ export function matches(pathname) {
   return /\/messages$/.test(pathname);
 }
 
+// Append a (non-redacted) instruction to the system prompt.
+export function injectSystemNote(body, note) {
+  if (!note || !body) return body;
+  if (typeof body.system === 'string') body.system += `\n\n${note}`;
+  else if (Array.isArray(body.system)) body.system.push({ type: 'text', text: note });
+  else body.system = note;
+  return body;
+}
+
 // Push segments for a content field that may be a string or an array of blocks
 // ({type:'text',text}, {type:'tool_result',content}, …).
 function collectContent(content, segs) {

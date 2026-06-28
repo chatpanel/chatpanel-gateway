@@ -33,7 +33,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.5.1';
+export const VERSION = '0.5.2';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -122,6 +122,18 @@ function pickAgent(model, cfg) {
   return KNOWN_AGENTS.has(model) ? model : cfg.bridge.agent;
 }
 
+// A follow-up request carrying a tool result for a PARKED relay session. Such a
+// request must NOT be redacted here: the relay owns redaction/restore through its
+// OWN (round-1) vault, so re-redacting with a fresh vault would put the tool
+// result's new tokens in the wrong vault and leave them unrestored in the reply.
+function isRelayResume(body, kind) {
+  if (kind !== 'openai' || !body) return false;
+  const tr = openai.extractLatestToolResult(body);
+  if (!tr) return false;
+  const parsed = parseToolCallId(tr.tool_call_id);
+  return !!(parsed && getRelaySession(parsed.gwId));
+}
+
 // Guard against an api destination pointing back at THIS gateway (loopback host +
 // our own port) — forwarding there would loop forever.
 function isSelfUrl(baseUrl, cfg) {
@@ -208,14 +220,11 @@ async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, 
   const redactOpts = { tier: effectiveTier({ tier: cfg.redaction.tier }, isPro), dictionary: gatedDictionary(cfg.redaction, isPro), entities: [] };
   const s = createRelaySession({ vault, redactOpts, bridgeUrl: cfg.bridge.url, token, harness });
   const ttl = setTimeout(() => endRelaySession(s.id), 135_000); // bridge tool-call timeout is 120s
-  // Tell the agent placeholders are auto-restored for tools, so privacy-aware agents
-  // (Codex/Claude) USE them instead of refusing. Appended after redaction.
-  const sysWithNote = (vault && tools?.length)
-    ? `${system || ''}\n\n${placeholderToolNote({ toolData: cfg.tools?.toolData })}`.trim()
-    : system;
+  // The placeholder note is already in `system` (injected into the body after
+  // redaction in the main handler), so toTurn() carried it here — nothing to add.
   let resp;
   try {
-    resp = await openBridgeChat({ bridgeUrl: cfg.bridge.url, agent, token, messages, system: sysWithNote, specs: toolsToSpecs(tools), options: {}, signal: undefined });
+    resp = await openBridgeChat({ bridgeUrl: cfg.bridge.url, agent, token, messages, system, specs: toolsToSpecs(tools), options: {}, signal: undefined });
   } catch (e) { clearTimeout(ttl); endRelaySession(s.id); return sendJson(res, 502, { error: { message: `bridge: ${e.message}`, type: 'bridge_error' } }); }
   s.reader = resp.body.getReader();
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
@@ -434,7 +443,11 @@ export function createGateway(cfg = loadConfig()) {
     let isPro = true;
     if (r.redactable && req.method === 'POST' && raw.length) {
       try { body = JSON.parse(raw.toString('utf8')); } catch { body = null; }
-      if (body) {
+      if (body && isRelayResume(body, r.kind)) {
+        // Relay tool-result follow-up: do NOT redact here — the parked session
+        // redacts the tool result + restores the reply with ITS vault. Pass raw.
+        outBody = raw;
+      } else if (body) {
         // Auto-narrow tools to the top-K most relevant for this turn (speed) —
         // same shared ranker as the extension's AUTO mode. Only MCP-named tools
         // are narrowed; the client's core tools (bash/read/edit…) are always kept,
@@ -463,6 +476,13 @@ export function createGateway(cfg = loadConfig()) {
         const { vault: v, count } = await redactSegments(segs, cfg.redaction, { signal: ac.signal, isPro });
         vault = v;
         redactedCount = count;
+        // When tools are armed, tell the model placeholders are auto-restored for
+        // tools (so privacy-aware models USE them instead of refusing). Injected
+        // AFTER redaction so the note isn't itself redacted. Covers BOTH the API
+        // forward and the relay (which reads system from this same body).
+        if (Array.isArray(body.tools) && body.tools.length && typeof r.adapter.injectSystemNote === 'function') {
+          r.adapter.injectSystemNote(body, placeholderToolNote({ toolData: cfg.tools?.toolData }));
+        }
         outBody = Buffer.from(JSON.stringify(body), 'utf8');
       }
     }

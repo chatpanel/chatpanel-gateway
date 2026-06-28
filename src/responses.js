@@ -9,6 +9,13 @@ export function matches(pathname) {
   return /\/responses$/.test(pathname);
 }
 
+// Append a (non-redacted) instruction to the Responses-API instructions field.
+export function injectSystemNote(body, note) {
+  if (!note || !body) return body;
+  body.instructions = body.instructions ? `${body.instructions}\n\n${note}` : note;
+  return body;
+}
+
 // Redactable text in a Responses request lives in `instructions` (system) and
 // `input` (a string, or an array of items whose content parts carry text).
 function collectInputItem(item, segs) {
