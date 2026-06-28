@@ -58,10 +58,13 @@ export function startNer(cfg) {
   const n = cfg.ner;
   if (!n || !n.autostart) return null;
 
-  // Respect an explicitly-configured detector — don't touch it.
+  // Respect an explicitly-configured detector — don't relaunch — but still apply
+  // the full-tier bump (else a persisted config with detection-on but tier:basic
+  // would never redact entities even though a detector is available).
   const det = cfg.redaction?.detection;
   if (det && det.backend && det.backend !== 'off') {
-    console.log(`[ner] detection already configured (${det.backend}) — leaving it as-is`);
+    if (n.enableFullTier && cfg.redaction.tier !== 'full') cfg.redaction.tier = 'full';
+    console.log(`[ner] detection already configured (${det.backend}) — full tier ${cfg.redaction.tier === 'full' ? 'on' : 'off'}`);
     return null;
   }
 
