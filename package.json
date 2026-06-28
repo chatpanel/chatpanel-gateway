@@ -1,6 +1,6 @@
 {
   "name": "@chatpanel/gateway",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Local privacy gateway — redacts PII out of OpenAI/Anthropic API traffic before it reaches a model, then restores it in the reply. Point opencode, codex, aider, Claude Code, etc. at it.",
   "type": "module",
   "bin": {

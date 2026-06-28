@@ -41,17 +41,44 @@ export function resolveDestination(model, cfg, kind) {
   );
 }
 
-// Aggregate every destination's models for GET /v1/models.
+// Aggregate every destination's models for GET /v1/models. Agents expose their
+// own name as the model; APIs expose ONLY real model ids (never the destination
+// id — that's a provider name, not a model).
 export function aggregateModels(cfg) {
   const data = [];
   const seen = new Set();
+  const add = (id, owner) => { if (id && !seen.has(id)) { seen.add(id); data.push({ id, object: 'model', owned_by: owner }); } };
   for (const d of listDestinations(cfg)) {
-    const models = (Array.isArray(d.models) && d.models.length) ? d.models : [d.id];
-    for (const m of models) {
-      if (!m || seen.has(m)) continue;
-      seen.add(m);
-      data.push({ id: m, object: 'model', owned_by: d.type === 'agent' ? 'chatpanel-bridge' : (d.id || 'api') });
-    }
+    if (d.type === 'agent') for (const m of (d.models?.length ? d.models : [d.id])) add(m, 'chatpanel-bridge');
+    else for (const m of (d.models || [])) add(m, d.id);
   }
   return { object: 'list', data };
+}
+
+// Async variant: also PROXIES each API destination's own /v1/models to discover
+// real model ids (using its saved key). Fail-open per destination.
+export async function aggregateModelsAsync(cfg, { timeoutMs = 4000 } = {}) {
+  const base = aggregateModels(cfg);
+  const seen = new Set(base.data.map((m) => m.id));
+  const dests = listDestinations(cfg).filter((d) => d.type === 'api' && d.baseUrl);
+  await Promise.all(dests.map(async (d) => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const headers = { 'content-type': 'application/json' };
+      if (d.apiKey) {
+        if (d.protocol === 'anthropic') { headers['x-api-key'] = d.apiKey; headers['anthropic-version'] = '2023-06-01'; }
+        else headers.authorization = `Bearer ${d.apiKey}`;
+      }
+      const res = await fetch(`${d.baseUrl.replace(/\/$/, '')}/models`, { headers, signal: ctrl.signal });
+      if (!res.ok) return;
+      const j = await res.json();
+      const list = Array.isArray(j?.data) ? j.data : (Array.isArray(j?.models) ? j.models : []);
+      for (const m of list) {
+        const id = typeof m === 'string' ? m : m?.id;
+        if (id && !seen.has(id)) { seen.add(id); base.data.push({ id, object: 'model', owned_by: d.id }); }
+      }
+    } catch { /* fail-open */ } finally { clearTimeout(t); }
+  }));
+  return base;
 }

@@ -27,12 +27,12 @@ import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
 import { resolvePro, meter, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, persistConfig, configPath } from './configstore.js';
-import { resolveDestination, aggregateModels } from './router.js';
+import { resolveDestination, aggregateModelsAsync } from './router.js';
 import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.2.1';
+export const VERSION = '0.2.2';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -253,7 +253,7 @@ export function createGateway(cfg = loadConfig()) {
 
     // Model discovery — aggregate every destination's models.
     if (req.method === 'GET' && /\/models$/.test(pathname)) {
-      return sendJson(res, 200, aggregateModels(cfg));
+      return sendJson(res, 200, await aggregateModelsAsync(cfg));
     }
 
     const r = route(pathname, req.headers, cfg);
