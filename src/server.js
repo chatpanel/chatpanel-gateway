@@ -21,8 +21,9 @@ import { createServer } from 'node:http';
 import { loadConfig } from './config.js';
 import { redactSegments } from './redact.js';
 import { pipeRestoredStream, makeTokenRestorer } from './stream.js';
-import { restoreText } from '@chatpanel/pii';
-import { streamBridgeChat, readBridgeToken } from './bridge.js';
+import { restoreText, effectiveTier, gatedDictionary } from '@chatpanel/pii';
+import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
+import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
 import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
 import { resolvePro, meter, usage } from './freegate.js';
@@ -32,7 +33,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.2.3';
+export const VERSION = '0.3.0';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -131,9 +132,68 @@ function forwardHeaders(headers, base) {
 
 // ---- backend: bridge -------------------------------------------------------
 
-async function handleBridge(req, res, { kind, adapter, redactable, pathname, agentOverride }, body, vault, cfg) {
+// Stream the bridge SSE through the OpenAI shaper, parking on a tool call.
+async function pumpRelay(res, s, shaper) {
+  const restorer = makeTokenRestorer(s.vault);
+  await pumpBridgeStream(s, {
+    onText: (text) => { const r = restorer.push(text); if (r) res.write(shaper.sseDelta(r)); },
+    onToolRequest: ({ name, restoredArgs, toolId }) => {
+      const tail = restorer.flush(); if (tail) res.write(shaper.sseDelta(tail));
+      res.write(shaper.sseToolCalls([{ id: toolId, name, arguments: JSON.stringify(restoredArgs) }]));
+      res.write(shaper.sseToolFinish());
+      res.end(); // park: turn ends with tool_calls; the session stays alive for the follow-up
+    },
+    onDone: () => { const tail = restorer.flush(); if (tail) res.write(shaper.sseDelta(tail)); res.write(shaper.sseTail()); res.end(); endRelaySession(s.id); },
+    onError: (e) => { res.write(`data: ${JSON.stringify({ error: { message: e.message, type: 'bridge_error' } })}\n\n`); res.end(); endRelaySession(s.id); },
+  });
+}
+
+// New tool-enabled turn: open the bridge with the client's tools as MCP specs.
+async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, isPro, tools) {
+  const { messages, system } = adapter.toTurn(body);
+  const token = readBridgeToken(cfg.bridge.token);
+  const shaper = shaperFor(kind, body?.model || agent);
+  const redactOpts = { tier: effectiveTier({ tier: cfg.redaction.tier }, isPro), dictionary: gatedDictionary(cfg.redaction, isPro), entities: [] };
+  const s = createRelaySession({ vault, redactOpts, bridgeUrl: cfg.bridge.url, token });
+  const ttl = setTimeout(() => endRelaySession(s.id), 135_000); // bridge tool-call timeout is 120s
+  let resp;
+  try {
+    resp = await openBridgeChat({ bridgeUrl: cfg.bridge.url, agent, token, messages, system, specs: toolsToSpecs(tools), options: {}, signal: undefined });
+  } catch (e) { clearTimeout(ttl); endRelaySession(s.id); return sendJson(res, 502, { error: { message: `bridge: ${e.message}`, type: 'bridge_error' } }); }
+  s.reader = resp.body.getReader();
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+  res.write(shaper.sseHead());
+  return pumpRelay(res, s, shaper);
+}
+
+// Follow-up turn carrying a tool result: feed it to the parked agent + resume.
+async function resumeRelay(res, s, toolContent, model) {
+  try { await deliverToolResult(s, toolContent); }
+  catch (e) { endRelaySession(s.id); return sendJson(res, 502, { error: { message: `tool-result: ${e.message}`, type: 'bridge_error' } }); }
+  const shaper = shaperFor('openai', model || 'codex');
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+  res.write(shaper.sseHead());
+  return pumpRelay(res, s, shaper);
+}
+
+async function handleBridge(req, res, { kind, adapter, redactable, pathname, agentOverride }, body, vault, cfg, isPro) {
   if (!redactable) {
     return sendJson(res, 404, { error: `endpoint ${pathname} not supported by the bridge backend` });
+  }
+
+  // Tool relay (OpenAI protocol + agent destinations). A follow-up request carries
+  // a tool result for a parked session; a new request with `tools` starts one.
+  if (kind === 'openai') {
+    const toolResult = adapter.extractLatestToolResult(body);
+    if (toolResult) {
+      const parsed = parseToolCallId(toolResult.tool_call_id);
+      const s = parsed && getRelaySession(parsed.gwId);
+      if (s) return resumeRelay(res, s, toolResult.content, body?.model);
+    }
+    const tools = adapter.extractTools(body);
+    if (tools.length && body?.stream === true) {
+      return startRelay(req, res, { kind, adapter, agent: agentOverride || pickAgent(body?.model, cfg) }, body, vault, cfg, isPro, tools);
+    }
   }
 
   const { messages, system } = adapter.toTurn(body);
@@ -282,11 +342,12 @@ export function createGateway(cfg = loadConfig()) {
     let body = null;
     let outBody = raw;
     let redactedCount = 0;
+    let isPro = true;
     if (r.redactable && req.method === 'POST' && raw.length) {
       try { body = JSON.parse(raw.toString('utf8')); } catch { body = null; }
       if (body) {
         // Free/Pro gate: meter the request and pick the effective tier.
-        const isPro = await resolvePro(cfg.pro?.entitlementToken);
+        isPro = await resolvePro(cfg.pro?.entitlementToken);
         const allow = meter(cfg, isPro);
         if (!allow.allowed) {
           return sendJson(res, 402, { error: {
@@ -318,7 +379,7 @@ export function createGateway(cfg = loadConfig()) {
       }
       return handleApi(req, res, { ...r, pathname, search: url.search, base: dest.baseUrl, destKey: dest.apiKey, destProtocol: dest.protocol }, outBody, vault);
     }
-    return handleBridge(req, res, { ...r, pathname, agentOverride: dest?.agent }, body, vault, cfg);
+    return handleBridge(req, res, { ...r, pathname, agentOverride: dest?.agent }, body, vault, cfg, isPro);
   });
 }
 

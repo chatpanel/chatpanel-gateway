@@ -38,6 +38,14 @@ export function openaiChat(model) {
     sseTail() {
       return sse({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) + 'data: [DONE]\n\n';
     },
+    // Tool-relay (agent destinations): emit the agent's tool call as an OpenAI
+    // tool_calls delta, then end the turn with finish_reason:tool_calls.
+    sseToolCalls(calls) {
+      return sse({ ...base, choices: [{ index: 0, delta: { tool_calls: calls.map((c, i) => ({ index: i, id: c.id, type: 'function', function: { name: c.name, arguments: c.arguments } })) }, finish_reason: null }] });
+    },
+    sseToolFinish() {
+      return sse({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }) + 'data: [DONE]\n\n';
+    },
   };
 }
 

@@ -37,6 +37,22 @@ export function toTurn(body) {
   return { messages: Array.isArray(body?.messages) ? body.messages : [], system: '' };
 }
 
+// Tool-relay: the client's tool definitions, and (on a follow-up request) the
+// most recent tool result the client sent back.
+export function extractTools(body) {
+  return Array.isArray(body?.tools) ? body.tools : [];
+}
+export function extractLatestToolResult(body) {
+  const msgs = Array.isArray(body?.messages) ? body.messages : [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m?.role === 'tool' && m.tool_call_id) {
+      return { tool_call_id: m.tool_call_id, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) };
+    }
+  }
+  return null;
+}
+
 // Restore a buffered (non-streaming) response: assistant text + tool-call args.
 export function restoreResponse(json, vault) {
   for (const choice of json?.choices || []) {
