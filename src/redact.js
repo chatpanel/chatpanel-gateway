@@ -29,9 +29,13 @@ export async function redactSegments(segments, redactionCfg, { signal, isPro = t
   if (tier === 'full' && redactionCfg.detection?.backend && redactionCfg.detection.backend !== 'off') {
     // One detection pass over the joined text — the detector is cached + fail-open,
     // so a slow/broken NER service never blocks the request (deterministic layer
-    // still runs).
+    // still runs). Give it a generous CEILING (matching the extension): a fast NER
+    // returns in well under a second, but a slow/cold detector must be allowed to
+    // finish — if it times out, the turn falls back to dictionary/deterministic-only
+    // redaction (permanent pseudonyms the reply-restorer can't undo).
+    const detection = { ...redactionCfg.detection, timeoutMs: Math.max(Number(redactionCfg.detection.timeoutMs) || 0, 30000) };
     try {
-      entities = await detectEntities(texts.join('\n\n'), { detection: redactionCfg.detection }, { signal });
+      entities = await detectEntities(texts.join('\n\n'), { detection }, { signal });
     } catch {
       entities = [];
     }
