@@ -21,7 +21,7 @@ import { createServer } from 'node:http';
 import { loadConfig } from './config.js';
 import { redactSegments } from './redact.js';
 import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer } from './stream.js';
-import { restoreText, effectiveTier, gatedDictionary } from '@chatpanel/pii';
+import { restoreText, effectiveTier, gatedDictionary, narrowSpecs } from '@chatpanel/pii';
 import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
 import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
 import { shaperFor } from './shape.js';
@@ -33,9 +33,39 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.3.1';
+export const VERSION = '0.4.0';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
+
+// Auto-narrow: arm only the top-K most-relevant MCP tools per turn (speed). Mirrors
+// the extension's AUTO mode via the SAME shared ranker. We narrow only tools whose
+// name looks like an MCP tool (server-prefixed) so a client's CORE tools (bash,
+// read, edit…) are never dropped — that would break agent clients like OpenCode.
+const DEFAULT_GATEWAY_TOOL_CAP = 8;
+const MCP_NAME_RE = /^mcp[_-]/i;
+const toolName = (t) => (t && t.function && t.function.name) || (t && t.name) || '';
+const toolDesc = (t) => (t && t.function && t.function.description) || (t && t.description) || '';
+
+// Flatten message/content shapes to the latest user text — the query we rank tools against.
+function textFromContent(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.map((p) => (typeof p === 'string' ? p : (p && (p.text || p.content)) || '')).join(' ');
+  return '';
+}
+function latestUserText(body, kind) {
+  if (!body) return '';
+  if (kind === 'responses') {
+    const inp = body.input;
+    if (typeof inp === 'string') return inp;
+    if (Array.isArray(inp)) return inp.map((x) => textFromContent(x && (x.content ?? x))).join(' ');
+    return '';
+  }
+  const msgs = Array.isArray(body.messages) ? body.messages : [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i] && msgs[i].role === 'user') return textFromContent(msgs[i].content);
+  }
+  return '';
+}
 
 const HOP_BY_HOP = new Set([
   'host', 'connection', 'content-length', 'transfer-encoding',
@@ -345,10 +375,24 @@ export function createGateway(cfg = loadConfig()) {
     let body = null;
     let outBody = raw;
     let redactedCount = 0;
+    let narrowedTools = 0;
     let isPro = true;
     if (r.redactable && req.method === 'POST' && raw.length) {
       try { body = JSON.parse(raw.toString('utf8')); } catch { body = null; }
       if (body) {
+        // Auto-narrow tools to the top-K most relevant for this turn (speed) —
+        // same shared ranker as the extension's AUTO mode. Only MCP-named tools
+        // are narrowed; the client's core tools (bash/read/edit…) are always kept,
+        // unless tools.narrowAll is set. Mutates body.tools BEFORE redaction so
+        // both the API forward and the bridge relay see the trimmed set.
+        const tcfg = cfg.tools || {};
+        if (tcfg.autoNarrow !== false && Array.isArray(body.tools) && body.tools.length) {
+          const cap = Number(tcfg.maxPerTurn) > 0 ? Number(tcfg.maxPerTurn) : DEFAULT_GATEWAY_TOOL_CAP;
+          const keep = tcfg.narrowAll ? null : (t) => !MCP_NAME_RE.test(toolName(t));
+          const before = body.tools.length;
+          body.tools = narrowSpecs(body.tools, latestUserText(body, r.kind), { cap, keep, name: toolName, description: toolDesc });
+          narrowedTools = before - body.tools.length;
+        }
         // Free/Pro gate: meter the request and pick the effective tier.
         isPro = await resolvePro(cfg.pro?.entitlementToken);
         const allow = meter(cfg, isPro);
@@ -372,8 +416,8 @@ export function createGateway(cfg = loadConfig()) {
     // API we forward to). Falls back to the legacy backend when none configured.
     const dest = resolveDestination(body?.model, cfg, r.kind);
     if (cfg.logRequests && r.redactable) {
-      recordRequest({ t: Date.now(), model: body?.model || null, dest: dest ? dest.id : null, type: dest ? dest.type : null, redacted: redactedCount });
-      console.log(`[gateway] ${req.method} ${pathname} · model=${body?.model || '-'} → ${dest ? `${dest.id}(${dest.type})` : 'none'} · redacted ${redactedCount}`);
+      recordRequest({ t: Date.now(), model: body?.model || null, dest: dest ? dest.id : null, type: dest ? dest.type : null, redacted: redactedCount, narrowed: narrowedTools });
+      console.log(`[gateway] ${req.method} ${pathname} · model=${body?.model || '-'} → ${dest ? `${dest.id}(${dest.type})` : 'none'} · redacted ${redactedCount}${narrowedTools ? ` · narrowed -${narrowedTools} tools` : ''}`);
     }
     if (dest && dest.type === 'api') {
       if (!dest.baseUrl) return sendJson(res, 502, { error: `destination "${dest.id}" has no baseUrl` });

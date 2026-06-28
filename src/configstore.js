@@ -19,7 +19,7 @@ export function persistConfig(cfg, path = configPath()) {
     host: cfg.host, port: cfg.port, backend: cfg.backend,
     bridge: cfg.bridge, upstreams: cfg.upstreams, redaction: cfg.redaction,
     ner: cfg.ner, allowedOrigins: cfg.allowedOrigins, maxBodyBytes: cfg.maxBodyBytes,
-    pro: cfg.pro, logRequests: cfg.logRequests,
+    pro: cfg.pro, logRequests: cfg.logRequests, tools: cfg.tools,
   };
   writeFileSync(path, JSON.stringify(out, null, 2));
 }
@@ -44,6 +44,11 @@ export function publicConfig(cfg, { proUnlocked = false } = {}) {
     allowedOrigins: Array.isArray(cfg.allowedOrigins) ? cfg.allowedOrigins : [],
     pro: { unlocked: proUnlocked, hasToken: !!cfg.pro?.entitlementToken, free: cfg.pro?.free },
     logRequests: !!cfg.logRequests,
+    tools: {
+      autoNarrow: cfg.tools?.autoNarrow !== false,
+      maxPerTurn: Number(cfg.tools?.maxPerTurn) > 0 ? Number(cfg.tools.maxPerTurn) : 8,
+      narrowAll: !!cfg.tools?.narrowAll,
+    },
   };
 }
 
@@ -96,5 +101,12 @@ export function applyConfigPatch(cfg, patch = {}) {
     if (Number.isFinite(cap) && cap >= 0) cfg.pro.free.maxRequestsPerDay = cap;
   }
   if (typeof patch.logRequests === 'boolean') cfg.logRequests = patch.logRequests;
+  if (patch.tools && typeof patch.tools === 'object') {
+    cfg.tools = cfg.tools || {};
+    if ('autoNarrow' in patch.tools) cfg.tools.autoNarrow = !!patch.tools.autoNarrow;
+    if ('narrowAll' in patch.tools) cfg.tools.narrowAll = !!patch.tools.narrowAll;
+    const cap = Number(patch.tools.maxPerTurn);
+    if (Number.isFinite(cap) && cap >= 1) cfg.tools.maxPerTurn = Math.floor(cap);
+  }
   return cfg;
 }

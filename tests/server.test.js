@@ -101,6 +101,41 @@ test('api: tool-call args get the REAL value (pseudonym undone), visible text ke
   gw.close(); up.close();
 });
 
+test('auto-narrow: trims MCP tools to top-k by relevance, never drops the client\'s core tools', async () => {
+  let seen = null;
+  const up = await fakeUpstream((body, req, res) => {
+    seen = JSON.parse(body);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+  });
+  const fn = (name, description) => ({ type: 'function', function: { name, description } });
+  const tools = [
+    fn('bash', 'run a shell command'), fn('read', 'read a file'), // core (non-mcp) — must survive
+    fn('mcp_wikipedia__search', 'search wikipedia articles'),
+    fn('mcp_hackernews__search', 'search hacker news'),
+    fn('mcp_github__search', 'search github repos'),
+    fn('mcp_jira__search', 'search jira issues'),
+    fn('mcp_slack__search', 'search slack messages'),
+  ];
+  const gw = createGateway({
+    host: '127.0.0.1', port: 0, backend: 'api',
+    upstreams: { openai: { baseUrl: `http://127.0.0.1:${up.port}` }, anthropic: {} },
+    redaction: { tier: 'basic', dictionary: [], detection: { backend: 'off' } },
+    tools: { autoNarrow: true, maxPerTurn: 2 },
+    ner: { autostart: false }, allowedOrigins: [], maxBodyBytes: 1 << 20, logRequests: false,
+  });
+  const port = await listen(gw);
+  await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'x', tools, messages: [{ role: 'user', content: 'use the wiki search to find a president' }] }),
+  });
+  const names = seen.tools.map((t) => t.function.name);
+  assert.ok(names.includes('bash') && names.includes('read'), 'core tools must always be kept');
+  assert.ok(names.includes('mcp_wikipedia__search'), 'the relevant MCP tool must be kept');
+  assert.equal(names.filter((n) => n.startsWith('mcp_')).length, 2, 'MCP tools narrowed to the cap (2)');
+  gw.close(); up.close();
+});
+
 test('loop guard: refuses to forward to a destination that is the gateway itself', async () => {
   const gw = createGateway({
     host: '127.0.0.1', port: 4320, // self port; destination below points here
