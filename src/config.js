@@ -73,20 +73,24 @@ const DEFAULTS = {
     // Local entity detector, passed straight to pii-detect.detectEntities.
     //   backend: 'off' | 'endpoint' (POST {text}->{entities}) | 'openai' (local LLM)
     //   url, model, timeoutMs, maxChars
-    // When `ner.autostart` is on (below), the gateway launches the bundled spaCy
-    // NER server and points detection at it automatically — leave this `off`.
+    // Leave this `off` to use the bundled in-process NER (see `ner` below). Set it
+    // only to point at YOUR OWN external detector (a custom NER or local LLM); that
+    // takes precedence over the bundled engine.
     detection: { backend: 'off' },
     // Per-request convenience: also redact the system prompt / system blocks.
     redactSystem: true,
   },
-  // Bundled local NER server (spaCy). When autostart is on, `npm start` also
-  // launches ./ner on this port and wires `redaction.detection` to it, so name/
-  // org redaction works out of the box with one command. Fails open: if Python/
-  // spaCy isn't set up, the gateway logs a hint and runs deterministic-only.
+  // Bundled IN-PROCESS NER (ONNX via transformers.js). When autostart is on, the
+  // gateway loads the entity detector in-process — no Python, no second port — so
+  // name/org redaction works out of the box. The model loads from
+  // ~/.chatpanel/models and is downloaded once on first run if absent. Larger /
+  // alternative models can be installed from the extension's Gateway settings.
+  // Fails open: if the model can't load, the gateway runs deterministic-only.
   ner: {
     autostart: true,
-    port: 9009,
-    // Auto-bump redaction.tier to 'full' once NER is up (names/orgs need it).
+    model: 'Xenova/bert-base-NER',
+    allowDownload: true,
+    // Auto-bump redaction.tier to 'full' once the detector is ready (names/orgs).
     enableFullTier: true,
   },
 

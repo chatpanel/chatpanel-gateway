@@ -14,14 +14,11 @@
     "start": "node bin/chatpanel-gateway.js",
     "test": "node --test",
     "typecheck": "tsc -p tsconfig.json",
-    "build:bin": "bash scripts/build-binaries.sh",
-    "gen:ner": "node scripts/gen-ner-assets.mjs",
-    "prepublishOnly": "node scripts/gen-ner-assets.mjs"
+    "build:bin": "bash scripts/build-binaries.sh"
   },
   "files": [
     "src",
     "bin",
-    "ner",
     "gateway.config.example.json",
     "LICENSE",
     "README.md"
@@ -30,7 +27,9 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@chatpanel/pii": "^0.2.5"
+    "@chatpanel/pii": "^0.2.5",
+    "@huggingface/transformers": "^4.2.0",
+    "onnxruntime-web": "1.26.0-dev.20260416-b7804b056c"
   },
   "homepage": "https://chatpanel.net",
   "repository": {

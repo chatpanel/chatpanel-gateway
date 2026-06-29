@@ -9,6 +9,7 @@
 // extension's pii-pipeline.)
 
 import { createVault, redactText, detectEntities, effectiveTier, gatedDictionary } from '@chatpanel/pii';
+import * as engine from './ner-engine.js';
 
 // tier: 'basic' | 'full'. For 'full' we run the local detector over the combined
 // text to harvest names/orgs, then redact every segment against that entity set.
@@ -25,17 +26,27 @@ export async function redactSegments(segments, redactionCfg, { signal, isPro = t
   const tier = effectiveTier({ tier: redactionCfg.tier }, isPro);
   const dictionary = gatedDictionary(redactionCfg, isPro);
 
+  // Detection source: a USER-configured external detector takes precedence; else
+  // the bundled in-process engine (no second port — we hand pii-detect a fetchImpl
+  // that runs the model in-process instead of doing real HTTP). Either way we reuse
+  // @chatpanel/pii's caching / timeout / type-gating — one source of truth.
+  const det = redactionCfg.detection;
+  const useExternal = !!(det && det.backend && det.backend !== 'off');
+  const useEngine = !useExternal && engine.isReady();
+
   let entities = [];
-  if (tier === 'full' && redactionCfg.detection?.backend && redactionCfg.detection.backend !== 'off') {
-    // One detection pass over the joined text — the detector is cached + fail-open,
-    // so a slow/broken NER service never blocks the request (deterministic layer
-    // still runs). Give it a generous CEILING (matching the extension): a fast NER
-    // returns in well under a second, but a slow/cold detector must be allowed to
-    // finish — if it times out, the turn falls back to dictionary/deterministic-only
-    // redaction (permanent pseudonyms the reply-restorer can't undo).
-    const detection = { ...redactionCfg.detection, timeoutMs: Math.max(Number(redactionCfg.detection.timeoutMs) || 0, 30000) };
+  if (tier === 'full' && (useExternal || useEngine)) {
+    // One detection pass over the joined text — cached + fail-open, so a slow/broken
+    // detector never blocks the request (the deterministic layer still runs). Give it
+    // a generous CEILING (matching the extension): a fast detector returns in well
+    // under a second, but a cold one must be allowed to finish; on timeout the turn
+    // falls back to dictionary/deterministic-only redaction.
+    const detection = useEngine
+      ? { backend: 'endpoint', url: 'inproc:ner', timeoutMs: 30000, maxChars: 8000, types: det?.types }
+      : { ...det, timeoutMs: Math.max(Number(det.timeoutMs) || 0, 30000) };
+    const fetchImpl = useEngine ? engine.fetchAdapter : undefined;
     try {
-      entities = await detectEntities(texts.join('\n\n'), { detection }, { signal });
+      entities = await detectEntities(texts.join('\n\n'), { detection }, { signal, fetchImpl });
     } catch {
       entities = [];
     }

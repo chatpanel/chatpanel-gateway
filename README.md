@@ -78,18 +78,24 @@ export OPENAI_BASE_URL=http://127.0.0.1:4320/v1     # OpenAI / codex / aider / c
 export ANTHROPIC_BASE_URL=http://127.0.0.1:4320     # Claude Code / Anthropic SDK
 ```
 
-## Name/org redaction is built in (bundled NER)
+## Name/org redaction is built in (in-process NER, no Python)
 
 Deterministic redaction (emails, phones, cards, SSNs, API keys, IPs) needs no
-setup. To also blind **names, organizations and locations**, the gateway bundles
-a local spaCy NER server under [`ner/`](ner) and — with `ner.autostart` on (the
-default) — **launches it for you on startup** and switches redaction to the
-`full` tier once it's healthy. First run creates a venv and downloads the model
-(needs `python3`); it's fail-open, so if Python isn't set up the gateway just runs
-deterministic-only.
+setup. To also blind **names, organizations and locations**, the gateway runs an
+**in-process** entity detector — an ONNX transformer model via transformers.js —
+with `ner.autostart` on (the default). There's **no Python, no second port, no
+separate process**: the same model runs identically on macOS / Windows / Linux.
+The model loads from `~/.chatpanel/models` and is downloaded once on first run if
+absent (set `ner.allowDownload: false` to require it be pre-placed). It's
+fail-open, so if the model can't load the gateway just runs deterministic-only.
+Once the detector is ready, redaction switches to the `full` tier automatically.
 
-Prefer a local LLM or an external NER service? Set `redaction.detection` yourself
-and the gateway won't autostart the bundled one.
+The default model (`Xenova/bert-base-NER`) matches or beats spaCy's small model on
+people/orgs/locations. Larger or alternative models can be installed from the
+ChatPanel extension's **Gateway** settings.
+
+Prefer a local LLM or your own external NER service? Set `redaction.detection`
+yourself and the gateway won't load the bundled one (yours takes precedence).
 
 ## Configuration
 
@@ -106,9 +112,11 @@ env vars. See [`gateway.config.example.json`](gateway.config.example.json).
 | `upstreams.openai.baseUrl` | `OPENAI_BASE_URL` | `https://api.openai.com` | api backend only |
 | `upstreams.anthropic.baseUrl` | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | api backend only |
 | `redaction.tier` | `CHATPANEL_REDACTION_TIER` | `basic` | `basic` (regex) or `full` (+ NER + dictionary) |
-| `redaction.detection` | — | _(auto via NER)_ | local detector; set to override the bundled one |
+| `redaction.detection` | — | _(off → bundled engine)_ | external detector; set to override the bundled in-process one |
 | `redaction.dictionary` | — | `[]` | custom `{ value\|pattern, type, alias? }` entries |
-| `ner.autostart` / `ner.port` | — | `true` / `9009` | launch + wire the bundled spaCy NER |
+| `ner.autostart` | — | `true` | load the bundled in-process NER on startup |
+| `ner.model` | — | `Xenova/bert-base-NER` | model id under `~/.chatpanel/models` |
+| `ner.allowDownload` | — | `true` | download the model on first run if absent |
 
 ## Endpoints
 

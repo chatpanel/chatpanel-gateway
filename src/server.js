@@ -26,6 +26,7 @@ import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
 import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
 import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
+import * as nerEngine from './ner-engine.js';
 import { resolvePro, meter, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, persistConfig, configPath } from './configstore.js';
 import { resolveDestination, aggregateModelsAsync } from './router.js';
@@ -162,16 +163,30 @@ function sendJson(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
-// The detector URL (…:9009/ner) and its sibling /health. Returns null when no
-// detector is wired (deterministic-only).
+// A USER-configured external detector's URL and its sibling /health. Returns null
+// when no external detector is wired (the bundled in-process engine is handled
+// separately in probeNerHealth / the /ner route).
 function nerBaseUrl(cfg) {
   const url = cfg.redaction?.detection?.url;
   if (!url || cfg.redaction?.detection?.backend === 'off') return null;
   return url;
 }
 
-// Live health probe of the bundled/configured NER (GET /health → { ok, model }).
+// Health of the detector for /status. The bundled IN-PROCESS engine takes
+// precedence; its public contract URL is the gateway's own /ner (no second port).
+// A user-configured external detector is probed over HTTP as before.
 async function probeNerHealth(cfg) {
+  if (nerEngine.state() !== 'off') {
+    const h = nerEngine.health();
+    return {
+      configured: h.configured,
+      ok: h.ok,
+      state: h.state,
+      model: h.model,
+      error: h.error || null,
+      url: h.configured ? `http://${cfg.host}:${cfg.port}/ner` : null,
+    };
+  }
   const url = nerBaseUrl(cfg);
   if (!url) return { configured: false, ok: false, url: null, model: null };
   try {
@@ -381,16 +396,30 @@ export function createGateway(cfg = loadConfig()) {
         uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
       });
     }
-    // Proxy the detector so it's checkable on the gateway's own port (the NER runs
-    // on its own port, e.g. 9009 — hitting :4320/ner used to 404). GET → health.
+    // The detector, on the gateway's own port (no second port). GET → health;
+    // POST {text} → {entities}. The bundled engine runs IN-PROCESS; a user's own
+    // external detector (if configured) is proxied for back-compat.
     if (pathname === '/ner') {
-      const url = nerBaseUrl(cfg);
-      if (!url) return sendJson(res, 503, { error: { message: 'NER not configured — deterministic-only redaction', type: 'ner_off' } });
       if (req.method === 'GET') {
         const health = await probeNerHealth(cfg);
         return sendJson(res, health.ok ? 200 : 503, health);
       }
       if (req.method === 'POST') {
+        // In-process engine path.
+        if (nerEngine.state() !== 'off') {
+          try {
+            const body = await readBody(req, cfg.maxBodyBytes);
+            let text = '';
+            try { text = JSON.parse(body.toString('utf8'))?.text || ''; } catch { /* empty */ }
+            const entities = await nerEngine.detect(text);
+            return sendJson(res, 200, { entities });
+          } catch (e) {
+            return sendJson(res, 500, { error: { message: `NER error: ${e.message}`, type: 'ner_error' } });
+          }
+        }
+        // External detector proxy (user-configured endpoint).
+        const url = nerBaseUrl(cfg);
+        if (!url) return sendJson(res, 503, { error: { message: 'NER not configured — deterministic-only redaction', type: 'ner_off' } });
         try {
           const body = await readBody(req, cfg.maxBodyBytes);
           const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(8000) });

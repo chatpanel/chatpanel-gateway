@@ -25,7 +25,8 @@
 
   "ner": {
     "autostart": true,
-    "port": 9009,
+    "model": "Xenova/bert-base-NER",
+    "allowDownload": true,
     "enableFullTier": true
   },
 
