@@ -76,7 +76,8 @@ export function health() {
 export async function detect(text, { signal } = {}) {
   if (!isReady()) return [];
   if (signal?.aborted) return [];
-  const out = await _pipe(String(text || ''), { aggregation_strategy: 'simple' });
+  const src = String(text || '');
+  const out = await _pipe(src, { aggregation_strategy: 'simple' });
   const ents = [];
   for (const e of out || []) {
     let word = String(e.word ?? '');
@@ -90,8 +91,37 @@ export async function detect(text, { signal } = {}) {
     if (!word) continue;
     ents.push({ value: word, type });
   }
-  // Drop noise: a lone 1-char span that didn't get stitched is never useful PII.
-  return ents.filter((e) => e.value.length > 1);
+  // Heal subword truncation AFTER merging (expanding before would corrupt a span the
+  // next "##" token still extends, e.g. "Sure"→"Suresh" then +"sh Kumar"). Then drop
+  // 1-char noise + dedupe (expansion can make two spans collide).
+  const seen = new Set();
+  const out2 = [];
+  for (const e of ents) {
+    const value = expandToWord(src, e.value.trim());
+    if (value.length <= 1) continue;
+    const k = `${e.type}:${value.toLowerCase()}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out2.push({ value, type: e.type });
+  }
+  return out2;
+}
+
+// Grow a detected span to its full surrounding word in the ORIGINAL text. A cased
+// model can truncate a name to a subword ("Suresh" → "Sure"), which would leave a
+// dangling fragment ("…[[PERSON]]sh") un-redacted — a leak. We extend across word
+// characters at both edges so the whole token is captured. Multi-word spans are
+// unaffected (their edges are already at spaces).
+function expandToWord(text, value) {
+  if (!value) return value;
+  const idx = text.indexOf(value);
+  if (idx < 0) return value;
+  const isWord = (c) => !!c && /[\p{L}\p{N}'’-]/u.test(c);
+  let s = idx;
+  let e = idx + value.length;
+  while (s > 0 && isWord(text[s - 1])) s--;
+  while (e < text.length && isWord(text[e])) e++;
+  return text.slice(s, e);
 }
 
 // Lets @chatpanel/pii's existing `endpoint` detection backend call us with NO real
