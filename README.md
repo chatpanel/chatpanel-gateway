@@ -73,15 +73,41 @@ before codex sees it, and the reply is restored before opencode renders it. The
 request's `model` (`codex`/`claude`/`opencode`/`pi`) picks which agent the bridge
 drives; otherwise the configured default (`codex`) is used.
 
-### Using the api backend instead (local models / BYO keys)
+### Quick start (api backend — no bridge)
 
-Set `backend: "api"` (see config) and the gateway forwards redacted traffic to a
-real provider endpoint, passing your `Authorization` / `x-api-key` through:
+If all you want is the gateway as a **redacting proxy in front of an API model**,
+you do **not** need the bridge. Set `backend: "api"` and (optionally) point the
+gateway's upstream at your provider — in `~/.chatpanel/gateway.config.json`:
+
+```json
+{
+  "backend": "api",
+  "upstreams": {
+    "openai":    { "baseUrl": "https://api.openai.com" },
+    "anthropic": { "baseUrl": "https://api.anthropic.com" }
+  }
+}
+```
+
+Then point your **client** at the gateway and send your **own** API key — the
+gateway redacts, forwards to the provider with your key (it stores none), and
+restores the reply:
 
 ```bash
-export OPENAI_BASE_URL=http://127.0.0.1:4320/v1     # OpenAI / codex / aider / cursor
+# In your CLIENT's environment (NOT the gateway's — see the footgun below):
+export OPENAI_BASE_URL=http://127.0.0.1:4320/v1     # OpenAI-compatible: codex / aider / cursor / SDKs
 export ANTHROPIC_BASE_URL=http://127.0.0.1:4320     # Claude Code / Anthropic SDK
 ```
+
+To target a non-OpenAI provider (a local model, OpenRouter, Azure, …) change the
+**gateway's** `upstreams.*.baseUrl` in the config above — that's where the gateway
+forwards to. Flow: `client → gateway (redact) → provider (your key) → gateway (restore) → client`.
+
+> ⚠️ **Footgun:** `OPENAI_BASE_URL` means two different things — for your *client*
+> it's "where the gateway is", for the *gateway* it's "where my upstream is". Don't
+> set `OPENAI_BASE_URL=…:4320` in the **gateway's own** environment, or it forwards
+> to itself (the loop guard returns 508). Set the gateway's upstream in the config
+> file; use the env var only in the client's shell.
 
 ## Name/org redaction is built in (in-process NER, no Python)
 
