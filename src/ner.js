@@ -10,10 +10,23 @@
 // external detector, which takes precedence — see below).
 
 import * as engine from './ner-engine.js';
+import { persistConfig, configPath } from './configstore.js';
 
 export function startNer(cfg) {
   const n = cfg.ner;
   if (!n || !n.autostart) return null;
+
+  // Migration: versions <0.6 persisted redaction.detection → the bundled spaCy
+  // server on :9009 (now removed). That's NOT a user's external detector — left in
+  // place it makes us skip the new in-process engine and probe a dead port. Clear
+  // it (and the dead ner.port) so the engine loads, and persist the cleanup.
+  const d = cfg.redaction?.detection;
+  if (d && d.url && /127\.0\.0\.1:9009\/ner/.test(d.url)) {
+    cfg.redaction.detection = { backend: 'off' };
+    if (cfg.ner) delete cfg.ner.port;
+    try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
+    console.log('[ner] migrated legacy spaCy detector config (:9009) → in-process engine');
+  }
 
   // Respect a USER-configured external detector (a custom NER endpoint or a local
   // LLM): don't load the bundled engine — just apply the full-tier bump so their
