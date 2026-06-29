@@ -35,7 +35,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.3';
+export const VERSION = '0.6.4';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -473,6 +473,18 @@ export function createGateway(cfg = loadConfig()) {
       if (!patch || typeof patch !== 'object') return sendJson(res, 400, { error: 'invalid config patch' });
       applyConfigPatch(cfg, patch);
       try { persistConfig(cfg, configPath()); } catch (e) { return sendJson(res, 500, { error: `could not persist config: ${e.message}` }); }
+      // The bundled NER engine only auto-loads at startup. If the user just switched
+      // detection BACK to the bundled engine (or it never loaded because an external
+      // detector was configured at boot), load it now so it doesn't stay "not running"
+      // until a restart. (An external detector needs no engine.) Fire-and-forget.
+      const det = cfg.redaction?.detection;
+      const usingBundled = !det || !det.backend || det.backend === 'off';
+      const st = nerEngine.state();
+      if (cfg.ner?.autostart && usingBundled && st !== 'ready' && st !== 'loading' && st !== 'downloading') {
+        nerEngine.setModel(cfg.ner.model, { onLog: (m) => console.log(m) }).then((ok) => {
+          if (ok && cfg.ner?.enableFullTier && cfg.redaction.tier !== 'full') cfg.redaction.tier = 'full';
+        });
+      }
       const proUnlocked = await resolvePro(cfg.pro?.entitlementToken);
       return sendJson(res, 200, publicConfig(cfg, { proUnlocked }));
     }
