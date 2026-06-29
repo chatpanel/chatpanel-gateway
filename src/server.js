@@ -27,6 +27,7 @@ import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream,
 import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
 import * as nerEngine from './ner-engine.js';
+import { MODEL_CATALOG, isKnownModel } from './models.js';
 import { resolvePro, meter, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, persistConfig, configPath } from './configstore.js';
 import { resolveDestination, aggregateModelsAsync } from './router.js';
@@ -429,6 +430,34 @@ export function createGateway(cfg = loadConfig()) {
         } catch (e) {
           return sendJson(res, 502, { error: { message: `NER unreachable: ${e.message}`, type: 'ner_unreachable' } });
         }
+      }
+    }
+    // Model manager (the extension's Gateway settings drive these). GET lists the
+    // catalog with install state + live download progress; POST switches the active
+    // model (downloading it first if needed) and persists the choice.
+    if (pathname === '/ner/models') {
+      if (req.method === 'GET') {
+        const available = MODEL_CATALOG.map((m) => ({ ...m, installed: nerEngine.modelOnDisk(m.id) }));
+        return sendJson(res, 200, {
+          active: nerEngine.health().model || cfg.ner?.model || null,
+          state: nerEngine.state(),
+          progress: nerEngine.progress(),
+          available,
+        });
+      }
+      if (req.method === 'POST') {
+        let body = null;
+        try { body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')); } catch { body = null; }
+        const id = body && typeof body.id === 'string' ? body.id : null;
+        if (!id || !isKnownModel(id)) return sendJson(res, 400, { error: { message: 'unknown model id', type: 'bad_model' } });
+        // Persist first so a restart keeps the choice, then (re)load. Don't block the
+        // response on a possibly-long download — the client polls GET for progress.
+        if (cfg.ner) cfg.ner.model = id; else cfg.ner = { autostart: true, model: id, allowDownload: true, enableFullTier: true };
+        try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
+        nerEngine.setModel(id, { onLog: (m) => console.log(m) }).then((ok) => {
+          if (ok && cfg.ner?.enableFullTier && cfg.redaction.tier !== 'full') cfg.redaction.tier = 'full';
+        });
+        return sendJson(res, 202, { accepted: true, active: id, state: nerEngine.state(), progress: nerEngine.progress() });
       }
     }
     if (pathname === '/logs' && req.method === 'GET') {

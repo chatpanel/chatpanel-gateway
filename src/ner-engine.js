@@ -25,6 +25,8 @@ let _model = null;         // active model id, e.g. 'Xenova/bert-base-NER'
 let _pipe = null;          // the loaded token-classification pipeline
 let _err = null;           // last error message (for /status)
 let _initPromise = null;   // single-flight init
+let _lib = null;           // memoized { env, pipeline } from transformers (imported once)
+let _progress = null;      // { model, file, pct } while a model is downloading, else null
 
 // Where model weights live ON DISK. A real, writable, persistent user dir — NOT
 // inside node_modules (wiped on reinstall, and absent entirely in a compiled
@@ -99,85 +101,117 @@ export async function fetchAdapter(_url, opts = {}) {
   });
 }
 
-// Load the model once. Returns a promise that resolves when ready (or after a
-// fail-open error). `cfg` = { model?, allowDownload?, onLog? }.
+// Live download progress for the model currently being fetched (or null). The
+// extension's model manager polls this. { model, file, pct }.
+export function progress() { return _progress; }
+
+// Import transformers ONCE and configure its env (model dir + WASM in a binary).
+async function ensureLib() {
+  if (_lib) return _lib;
+  const root = modelRoot();
+  try { mkdirSync(root, { recursive: true }); } catch { /* best effort */ }
+
+  // In a Bun --compile single-file binary there is no native onnxruntime-node (its
+  // dylib can't be embedded), so the binary entry embeds the onnxruntime-web WASM
+  // runtime and hands us its paths via this global. When present we force the WASM
+  // backend (transformers picks it when it doesn't see a Node env) BEFORE importing
+  // transformers. The npm/Node path leaves this unset and uses the faster native
+  // runtime.
+  const wasmPaths = globalThis.__CHATPANEL_WASM_PATHS__ || null;
+  if (wasmPaths) {
+    try { Object.defineProperty(process, 'release', { value: { ...process.release, name: 'bun' }, configurable: true }); } catch { /* ignore */ }
+  }
+
+  const { env, pipeline } = await import('@huggingface/transformers');
+  env.cacheDir = root;          // where remote downloads are cached
+  env.localModelPath = root;    // where local loads resolve — same dir, we control it
+  try { env.backends.onnx.wasm.numThreads = 1; } catch { /* optional */ }
+  if (wasmPaths) {
+    // Single-thread + no proxy + preloaded wasm bytes — avoids the `blob:` ESM-scheme
+    // failure when ORT-web runs outside a browser.
+    try { env.backends.onnx.wasm.proxy = false; env.backends.onnx.wasm.wasmPaths = wasmPaths; } catch { /* optional */ }
+  }
+  _lib = { env, pipeline };
+  return _lib;
+}
+
+// (Re)load a specific model into _pipe. Downloads it first if missing (and allowed).
+// Reusable by init() and setModel(). Fail-open: on error, state='error', _pipe stays
+// whatever it was (so a failed SWITCH doesn't kill a working detector).
+async function loadModel(modelId, { log = () => {}, allowDownload = true } = {}) {
+  const prevPipe = _pipe;
+  const prevModel = _model;
+  let lib;
+  try {
+    lib = await ensureLib();
+  } catch (e) {
+    _state = 'error'; _err = `engine load failed: ${e.message}`;
+    log(`[ner] transformers.js not available (${e.message}) — deterministic-only`);
+    return false;
+  }
+
+  const haveLocal = modelOnDisk(modelId);
+  // Offline if cached (fast + private); only reach the network when missing.
+  lib.env.allowRemoteModels = haveLocal ? false : !!allowDownload;
+  if (!haveLocal && !allowDownload) {
+    _state = 'error'; _err = 'model not on disk and downloads disabled';
+    log(`[ner] model ${modelId} not installed and downloads disabled — deterministic-only`);
+    return false;
+  }
+
+  _state = haveLocal ? 'loading' : 'downloading';
+  if (!haveLocal) { _progress = { model: modelId, file: null, pct: 0 }; log(`[ner] downloading model ${modelId} (one-time)…`); }
+
+  try {
+    const pipe = await lib.pipeline('token-classification', modelId, {
+      dtype: 'q8',
+      progress_callback: (p) => {
+        if (!p) return;
+        const pct = typeof p.progress === 'number' ? Math.round(p.progress) : (_progress?.pct ?? 0);
+        if (p.status === 'progress' || p.status === 'download' || p.status === 'initiate') {
+          _progress = { model: modelId, file: p.file || _progress?.file || null, pct };
+        } else if (p.status === 'done' && p.file) {
+          log(`[ner] fetched ${p.file}`);
+        }
+      },
+    });
+    // Swap in the new pipeline, dispose the old one (free its WASM/native session).
+    _pipe = pipe; _model = modelId; _state = 'ready'; _err = null; _progress = null;
+    if (prevPipe && prevPipe !== pipe) { try { await prevPipe.dispose?.(); } catch { /* ignore */ } }
+    log(`[ner] ready — model ${modelId} (in-process, no Python) — entity detection active`);
+    return true;
+  } catch (e) {
+    _err = e.message; _progress = null;
+    // Keep any previously-working detector rather than going dark on a bad switch.
+    if (prevPipe) { _pipe = prevPipe; _model = prevModel; _state = 'ready'; }
+    else { _state = 'error'; }
+    log(`[ner] model load failed (${e.message})${prevPipe ? ' — keeping previous model' : ' — deterministic-only'}`);
+    return false;
+  }
+}
+
+// Load the default/configured model once at startup. Returns a promise that
+// resolves when ready (or after a fail-open error). `cfg` = { model?, allowDownload?, onLog? }.
 export function init(cfg = {}) {
   if (_initPromise) return _initPromise;
-  _model = cfg.model || DEFAULT_MODEL;
   const log = typeof cfg.onLog === 'function' ? cfg.onLog : () => {};
-
-  _initPromise = (async () => {
-    _state = 'loading';
-    const root = modelRoot();
-    try { mkdirSync(root, { recursive: true }); } catch { /* best effort */ }
-
-    const haveLocal = modelOnDisk(_model);
-    // Offline if cached (fast + private); only reach the network on a true first
-    // run, and only if downloads aren't disabled.
-    const allowRemote = haveLocal ? false : (cfg.allowDownload !== false);
-
-    // In a Bun --compile single-file binary there is no native onnxruntime-node
-    // (its dylib can't be embedded), so the binary entry embeds the onnxruntime-web
-    // WASM runtime and hands us its paths via this global. When present we force the
-    // WASM backend (transformers picks it when it doesn't see a Node env) BEFORE
-    // importing transformers. The npm/Node path leaves this unset and uses the
-    // faster native runtime.
-    const wasmPaths = globalThis.__CHATPANEL_WASM_PATHS__ || null;
-    if (wasmPaths) {
-      try { Object.defineProperty(process, 'release', { value: { ...process.release, name: 'bun' }, configurable: true }); } catch { /* ignore */ }
-    }
-
-    let env, pipeline;
-    try {
-      ({ env, pipeline } = await import('@huggingface/transformers'));
-    } catch (e) {
-      _state = 'error'; _err = `engine load failed: ${e.message}`;
-      log(`[ner] transformers.js not available (${e.message}) — deterministic-only`);
-      return;
-    }
-
-    // Point the library at our persistent model dir for BOTH local loads and any
-    // remote download cache, so weights land in one place we control.
-    env.cacheDir = root;
-    env.localModelPath = root;
-    env.allowRemoteModels = allowRemote;
-    try { env.backends.onnx.wasm.numThreads = 1; } catch { /* optional */ }
-    if (wasmPaths) {
-      // Single-thread + no proxy + preloaded wasm bytes — this is what avoids the
-      // `blob:` ESM-scheme failure when ORT-web runs outside a browser.
-      try {
-        env.backends.onnx.wasm.proxy = false;
-        env.backends.onnx.wasm.wasmPaths = wasmPaths;
-      } catch { /* optional */ }
-    }
-
-    if (!haveLocal && allowRemote) {
-      _state = 'downloading';
-      log(`[ner] first run: downloading model ${_model} (one-time, ~100 MB)…`);
-    } else if (!haveLocal && !allowRemote) {
-      _state = 'error'; _err = 'model not on disk and downloads disabled';
-      log(`[ner] model ${_model} not installed and downloads disabled — deterministic-only`);
-      return;
-    }
-
-    try {
-      _pipe = await pipeline('token-classification', _model, {
-        dtype: 'q8',
-        progress_callback: (p) => {
-          if (p?.status === 'done' && p?.file) log(`[ner] fetched ${p.file}`);
-        },
-      });
-      _state = 'ready';
-      log(`[ner] ready — model ${_model} (in-process, no Python, port :reuse) — entity detection active`);
-    } catch (e) {
-      _state = 'error'; _err = e.message;
-      log(`[ner] model load failed (${e.message}) — deterministic-only`);
-    }
-  })();
+  _model = cfg.model || DEFAULT_MODEL;
+  _state = 'loading';
+  _initPromise = loadModel(_model, { log, allowDownload: cfg.allowDownload !== false });
   return _initPromise;
+}
+
+// Switch to a different model (download it first if needed). Used by the model
+// manager. Returns true on success. A failed switch keeps the current detector.
+export async function setModel(modelId, opts = {}) {
+  const log = typeof opts.onLog === 'function' ? opts.onLog : () => {};
+  const allowDownload = opts.allowDownload !== false;
+  if (!modelId) return false;
+  if (modelId === _model && isReady()) return true;
+  return loadModel(modelId, { log, allowDownload });
 }
 
 // Test hook: reset module state (used by unit tests).
 export function _reset() {
-  _state = 'off'; _model = null; _pipe = null; _err = null; _initPromise = null;
+  _state = 'off'; _model = null; _pipe = null; _err = null; _initPromise = null; _lib = null; _progress = null;
 }
