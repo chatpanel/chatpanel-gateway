@@ -43,9 +43,14 @@ You need the [ChatPanel bridge](https://github.com/chatpanel/chatpanel-bridge)
 running and logged into codex/claude (the same bridge the extension uses).
 
 ```bash
+# Standalone binary — no Node.js required:
+curl -fsSL https://dl.chatpanel.net/gateway/install.sh | bash   # macOS / Linux
+#   Windows (PowerShell):  irm https://dl.chatpanel.net/gateway/install.ps1 | iex
+
+# Or via npm (needs Node):
 npm install -g @chatpanel/gateway
 chatpanel-gateway
-# → ChatPanel Privacy Gateway v0.1.0 on http://127.0.0.1:4320
+# → ChatPanel Privacy Gateway on http://127.0.0.1:4320
 #     backend  : bridge (agent: codex, via http://127.0.0.1:4319)
 ```
 
