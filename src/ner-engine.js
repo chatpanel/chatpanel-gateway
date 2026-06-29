@@ -20,6 +20,13 @@ import { existsSync, mkdirSync } from 'node:fs';
 
 const DEFAULT_MODEL = 'Xenova/bert-base-NER';
 
+// Download models from ChatPanel's own CDN (a branded, edge-cached proxy we
+// control) rather than directly from Hugging Face — so a clean install depends only
+// on chatpanel.net. Override with CHATPANEL_MODEL_BASE_URL (e.g. point at HF for
+// dev, or an air-gapped mirror). Must end with '/' (transformers appends the model
+// path template to it).
+const MODEL_HOST = (process.env.CHATPANEL_MODEL_BASE_URL || 'https://dl.chatpanel.net/models/').replace(/\/*$/, '/');
+
 let _state = 'off';        // 'off' | 'loading' | 'downloading' | 'ready' | 'error'
 let _model = null;         // active model id, e.g. 'Xenova/bert-base-NER'
 let _pipe = null;          // the loaded token-classification pipeline
@@ -125,6 +132,7 @@ async function ensureLib() {
   const { env, pipeline } = await import('@huggingface/transformers');
   env.cacheDir = root;          // where remote downloads are cached
   env.localModelPath = root;    // where local loads resolve — same dir, we control it
+  try { env.remoteHost = MODEL_HOST; } catch { /* optional */ }
   try { env.backends.onnx.wasm.numThreads = 1; } catch { /* optional */ }
   if (wasmPaths) {
     // Single-thread + no proxy + preloaded wasm bytes — avoids the `blob:` ESM-scheme
