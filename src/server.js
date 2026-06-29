@@ -33,7 +33,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.5.5';
+export const VERSION = '0.5.6';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -41,7 +41,7 @@ const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'anti
 // the extension's AUTO mode via the SAME shared ranker. We narrow only tools whose
 // name looks like an MCP tool (server-prefixed) so a client's CORE tools (bash,
 // read, edit…) are never dropped — that would break agent clients like OpenCode.
-const DEFAULT_GATEWAY_TOOL_CAP = 8;
+const DEFAULT_GATEWAY_TOOL_CAP = 16;
 const MCP_NAME_RE = /^mcp[_-]/i;
 const toolName = (t) => (t && t.function && t.function.name) || (t && t.name) || '';
 const toolDesc = (t) => (t && t.function && t.function.description) || (t && t.description) || '';
