@@ -96,6 +96,14 @@ const DEFAULTS = {
 
   // Log one line per request (method, tokens redacted) without any raw values.
   logRequests: true,
+
+  // Optional per-request redaction breakdown attached to each log entry (shown
+  // expandable in the extension). Memory-only — never persisted to disk with the
+  // captured values; only the MODE is saved.
+  //   'off'    — counts only (default; the privacy-safe baseline)
+  //   'types'  — entity types + placeholder tokens (e.g. PERSON_1), no real values
+  //   'values' — real → placeholder mapping (the actual PII; opt-in, debugging)
+  logDetail: 'off',
 };
 
 function deepMerge(base, over) {

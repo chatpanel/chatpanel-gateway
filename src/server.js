@@ -100,12 +100,59 @@ function setCors(res, origin) {
 
 const STARTED_AT = Date.now();
 
-// In-memory ring of recent request SUMMARIES for the extension's monitoring view.
-// Counts only — never any prompt/response text or values.
-const recentRequests = [];
-function recordRequest(entry) {
-  recentRequests.push(entry);
-  if (recentRequests.length > 50) recentRequests.shift();
+// Render a timings map as a compact one-liner for the console log.
+function fmtTimings(t) {
+  if (!t) return '';
+  const label = { redact: 'redact', upstream: 'model', restore: 'restore', total: 'total' };
+  return Object.keys(t).map((k) => `${label[k] || k} ${t[k]}ms`).join(' · ');
+}
+
+// Per-request timing + summary. Created ONLY when logging is on — when it's off
+// the handler passes a null trace and every `trace?.…` call short-circuits, so we
+// don't even read the clock: logging then adds zero latency. The committed entry
+// is flushed to the in-memory ring via setImmediate, i.e. AFTER the response has
+// been handed back, so recording (and the console line) never sits on the request
+// path. `timings` are wall-clock ms per stage of the flow:
+//   redact   prompt → harness[redact] → model input
+//   upstream model input → model output  (network + inference; usually dominant)
+//   restore  model output → harness[restore] → user response
+//   total    end-to-end through the gateway
+function mkTrace(sink) {
+  const start = performance.now();
+  const timings = {};
+  let done = false;
+  const mark = (name, ms) => { timings[name] = Math.round(ms * 10) / 10; };
+  return {
+    meta: {}, timings, mark,
+    // Stamp the duration of an already-completed stage (`t0` from clock()).
+    lap(name, t0) { mark(name, performance.now() - t0); },
+    clock() { return performance.now(); },
+    commit() {
+      if (done) return; done = true;
+      mark('total', performance.now() - start);
+      const entry = /** @type {any} */ ({ ...this.meta, timings });
+      setImmediate(() => {
+        sink(entry);
+        console.log(`[gateway] model=${entry.model || '-'} → ${entry.dest ? `${entry.dest}(${entry.type})` : 'none'} · redacted ${entry.redacted || 0}${entry.narrowed ? ` · narrowed -${entry.narrowed}` : ''} · ${fmtTimings(timings)}`);
+      });
+    },
+  };
+}
+
+// Build the optional per-request redaction breakdown from the request's vault.
+// 'types'  → [{ token:'PERSON_1', type:'PERSON' }]            (no real values)
+// 'values' → [{ token:'PERSON_1', type:'PERSON', value:'…' }] (the real PII; opt-in)
+// Lives only in the in-memory ring — never written to disk by persistConfig.
+function redactionDetail(vault, mode) {
+  if (!vault || !vault.byToken || (mode !== 'types' && mode !== 'values')) return undefined;
+  const out = [];
+  for (const [token, value] of vault.byToken) {
+    const m = /^\[\[([A-Z][A-Z0-9]*)_\d+\]\]$/.exec(token);
+    const t = m ? m[1] : 'PII';
+    const bare = token.replace(/^\[\[|\]\]$/g, '');
+    out.push(mode === 'values' ? { token: bare, type: t, value } : { token: bare, type: t });
+  }
+  return out;
 }
 
 // Classify a request: which protocol kind + adapter, whether it's a redactable
@@ -258,22 +305,26 @@ async function resumeRelay(res, s, toolContent, model) {
   return pumpRelay(res, s, shaper);
 }
 
-async function handleBridge(req, res, { kind, adapter, redactable, pathname, agentOverride, harness }, body, vault, cfg, isPro) {
+async function handleBridge(req, res, { kind, adapter, redactable, pathname, agentOverride, harness, trace }, body, vault, cfg, isPro) {
   if (!redactable) {
+    trace?.commit();
     return sendJson(res, 404, { error: `endpoint ${pathname} not supported by the bridge backend` });
   }
 
   // Tool relay (OpenAI protocol + agent destinations). A follow-up request carries
   // a tool result for a parked session; a new request with `tools` starts one.
+  // The relay streams its own multi-turn flow; commit the trace now with the
+  // redaction timing known so far (fine-grained relay spans are a future add).
   if (kind === 'openai') {
     const toolResult = adapter.extractLatestToolResult(body);
     if (toolResult) {
       const parsed = parseToolCallId(toolResult.tool_call_id);
       const s = parsed && getRelaySession(parsed.gwId);
-      if (s) return resumeRelay(res, s, toolResult.content, body?.model);
+      if (s) { trace?.commit(); return resumeRelay(res, s, toolResult.content, body?.model); }
     }
     const tools = adapter.extractTools(body);
     if (tools.length && body?.stream === true) {
+      trace?.commit();
       return startRelay(req, res, { kind, adapter, agent: agentOverride || pickAgent(body?.model, cfg) }, body, vault, cfg, isPro, tools, harness);
     }
   }
@@ -291,10 +342,17 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
   if (!wantStream) {
     try {
       let full = '';
+      const up0 = trace ? trace.clock() : 0;
       await streamBridgeChat(turn, (t) => { full += t; });
+      if (trace) trace.lap('upstream', up0);
+      const rs0 = trace ? trace.clock() : 0;
+      const out = shaper.full(restoreText(full, vault));
+      if (trace) trace.lap('restore', rs0);
       res.writeHead(200, { 'content-type': shaper.contentType });
-      return res.end(shaper.full(restoreText(full, vault)));
+      res.end(out);
+      return trace?.commit();
     } catch (e) {
+      trace?.commit();
       return sendJson(res, 502, { error: { message: `bridge backend failed: ${e.message}`, type: 'bridge_error' } });
     }
   }
@@ -302,8 +360,11 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
   res.write(shaper.sseHead());
   const restorer = makeTokenRestorer(vault);
+  const up0 = trace ? trace.clock() : 0;
   try {
+    let first = true;
     await streamBridgeChat(turn, (chunk) => {
+      if (trace && first) { trace.lap('upstream', up0); first = false; } // time-to-first-byte
       const restored = restorer.push(chunk);
       if (restored) res.write(shaper.sseDelta(restored));
     });
@@ -314,12 +375,14 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
     res.write(`data: ${JSON.stringify({ error: { message: e.message, type: 'bridge_error' } })}\n\n`);
   }
   res.end();
+  trace?.commit();
 }
 
 // ---- backend: api ----------------------------------------------------------
 
-async function handleApi(req, res, { adapter, kind, pathname, search, base, destKey, destProtocol, harness }, outBody, vault) {
+async function handleApi(req, res, { adapter, kind, pathname, search, base, destKey, destProtocol, harness, trace }, outBody, vault) {
   let upstream;
+  const up0 = trace ? trace.clock() : 0;
   try {
     const headers = forwardHeaders(req.headers, base);
     // If the destination carries its own key (imported from a configured API),
@@ -334,6 +397,7 @@ async function handleApi(req, res, { adapter, kind, pathname, search, base, dest
       body: ['GET', 'HEAD'].includes(req.method) ? undefined : outBody,
     });
   } catch (e) {
+    trace?.commit();
     return sendJson(res, 502, { error: `upstream fetch failed: ${e.message}` });
   }
 
@@ -342,29 +406,46 @@ async function handleApi(req, res, { adapter, kind, pathname, search, base, dest
   upstream.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k.toLowerCase())) resHeaders[k] = v; });
 
   if (ct.includes('text/event-stream') && upstream.body) {
+    if (trace) trace.lap('upstream', up0); // time-to-first-byte; restore is inline as the stream flows
     res.writeHead(upstream.status, resHeaders);
     // OpenAI streaming: restore tool-call args via the harness (real, or kept
     // redacted for remote MCP under redactRemote) while keeping visible text
-    // pseudonymized. Other protocols: generic restore.
-    if (kind === 'openai') return pipeRestoredOpenAIStream(upstream.body, res, vault, harness);
-    return pipeRestoredStream(upstream.body, res, vault);
+    // pseudonymized. Other protocols: generic restore. Commit the trace once the
+    // stream finishes (total then spans the whole streamed response).
+    const piped = kind === 'openai'
+      ? pipeRestoredOpenAIStream(upstream.body, res, vault, harness)
+      : pipeRestoredStream(upstream.body, res, vault);
+    return Promise.resolve(piped).finally(() => trace?.commit());
   }
 
   const buf = Buffer.from(await upstream.arrayBuffer());
+  if (trace) trace.lap('upstream', up0);
   if (vault && ct.includes('application/json')) {
     try {
+      const rs0 = trace ? trace.clock() : 0;
       const json = adapter.restoreResponse(JSON.parse(buf.toString('utf8')), vault, harness);
+      if (trace) trace.lap('restore', rs0);
       res.writeHead(upstream.status, { ...resHeaders, 'content-type': 'application/json' });
-      return res.end(Buffer.from(JSON.stringify(json), 'utf8'));
+      res.end(Buffer.from(JSON.stringify(json), 'utf8'));
+      return trace?.commit();
     } catch { /* fall through */ }
   }
   res.writeHead(upstream.status, resHeaders);
   res.end(buf);
+  trace?.commit();
 }
 
 // ---- server ----------------------------------------------------------------
 
 export function createGateway(cfg = loadConfig()) {
+  // Per-gateway ring of recent request summaries for the extension's monitoring
+  // view (newest last). Counts + optional redaction detail + per-stage timings —
+  // see mkTrace. Lives only here, never persisted to disk.
+  const recentRequests = [];
+  const recordRequest = (entry) => {
+    recentRequests.push(entry);
+    if (recentRequests.length > 50) recentRequests.shift();
+  };
   return createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     const pathname = url.pathname;
@@ -461,7 +542,7 @@ export function createGateway(cfg = loadConfig()) {
       }
     }
     if (pathname === '/logs' && req.method === 'GET') {
-      return sendJson(res, 200, { entries: [...recentRequests].reverse() }); // newest first; counts only
+      return sendJson(res, 200, { entries: [...recentRequests].reverse() }); // newest first; counts only, unless logDetail enriches each entry
     }
     if (pathname === '/config' && req.method === 'GET') {
       const proUnlocked = await resolvePro(cfg.pro?.entitlementToken);
@@ -511,6 +592,9 @@ export function createGateway(cfg = loadConfig()) {
     let redactedCount = 0;
     let narrowedTools = 0;
     let isPro = true;
+    // Off the hot path: only build a trace when logging is on, so it adds nothing
+    // when off (no clock reads, no record, no console line).
+    const trace = (cfg.logRequests && r.redactable && req.method === 'POST') ? mkTrace(recordRequest) : null;
     if (r.redactable && req.method === 'POST' && raw.length) {
       try { body = JSON.parse(raw.toString('utf8')); } catch { body = null; }
       if (body && isRelayResume(body, r.kind)) {
@@ -543,7 +627,9 @@ export function createGateway(cfg = loadConfig()) {
         const segs = r.adapter.collectSegments(body, cfg.redaction);
         const ac = new AbortController();
         req.on('close', () => ac.abort());
+        const rd0 = trace ? trace.clock() : 0;
         const { vault: v, count } = await redactSegments(segs, cfg.redaction, { signal: ac.signal, isPro });
+        if (trace) trace.lap('redact', rd0);
         vault = v;
         redactedCount = count;
         // When tools are armed, tell the model placeholders are auto-restored for
@@ -566,18 +652,18 @@ export function createGateway(cfg = loadConfig()) {
     // Route by the requested model → a destination (agent via the bridge, or an
     // API we forward to). Falls back to the legacy backend when none configured.
     const dest = resolveDestination(body?.model, cfg, r.kind);
-    if (cfg.logRequests && r.redactable) {
-      recordRequest({ t: Date.now(), model: body?.model || null, dest: dest ? dest.id : null, type: dest ? dest.type : null, redacted: redactedCount, narrowed: narrowedTools });
-      console.log(`[gateway] ${req.method} ${pathname} · model=${body?.model || '-'} → ${dest ? `${dest.id}(${dest.type})` : 'none'} · redacted ${redactedCount}${narrowedTools ? ` · narrowed -${narrowedTools} tools` : ''}`);
+    if (trace) {
+      trace.meta = { t: Date.now(), model: body?.model || null, dest: dest ? dest.id : null, type: dest ? dest.type : null, redacted: redactedCount, narrowed: narrowedTools, detail: redactionDetail(vault, cfg.logDetail) };
     }
     if (dest && dest.type === 'api') {
-      if (!dest.baseUrl) return sendJson(res, 502, { error: `destination "${dest.id}" has no baseUrl` });
+      if (!dest.baseUrl) { trace?.commit(); return sendJson(res, 502, { error: `destination "${dest.id}" has no baseUrl` }); }
       if (isSelfUrl(dest.baseUrl, cfg)) {
+        trace?.commit();
         return sendJson(res, 508, { error: { message: `destination "${dest.id}" points back at the gateway (${dest.baseUrl}) — refusing to forward (would loop).`, type: 'loop_detected' } });
       }
-      return handleApi(req, res, { ...r, pathname, search: url.search, base: dest.baseUrl, destKey: dest.apiKey, destProtocol: dest.protocol, harness }, outBody, vault);
+      return handleApi(req, res, { ...r, pathname, search: url.search, base: dest.baseUrl, destKey: dest.apiKey, destProtocol: dest.protocol, harness, trace }, outBody, vault);
     }
-    return handleBridge(req, res, { ...r, pathname, agentOverride: dest?.agent, harness }, body, vault, cfg, isPro);
+    return handleBridge(req, res, { ...r, pathname, agentOverride: dest?.agent, harness, trace }, body, vault, cfg, isPro);
   });
 }
 

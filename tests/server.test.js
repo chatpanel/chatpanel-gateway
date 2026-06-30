@@ -202,3 +202,125 @@ test('responses (Codex) shape: input + instructions redacted, output restored', 
   assert.match(json.output[0].content[0].text, /alex@example\.com/);
   gw.close(); up.close();
 });
+
+// Helper: send one chat request, then read back the newest /logs entry.
+async function sendAndGetLog(extra) {
+  const up = await fakeUpstream((body, req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+  });
+  const gw = createGateway({ ...cfg(`http://127.0.0.1:${up.port}`), logRequests: true, ...extra });
+  const port = await listen(gw);
+  await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: 'mail alex@example.com' }] }),
+  });
+  const logs = await (await fetch(`http://127.0.0.1:${port}/logs`)).json();
+  gw.close(); up.close();
+  return logs.entries[0];
+}
+
+test('/logs detail (values): captures the real → placeholder mapping', async () => {
+  const e = await sendAndGetLog({ logDetail: 'values' });
+  assert.equal(e.redacted, 1);
+  assert.ok(Array.isArray(e.detail) && e.detail.length === 1);
+  const [d] = e.detail;
+  assert.equal(d.type, 'EMAIL');
+  assert.equal(d.token, 'EMAIL_1');
+  assert.equal(d.value, 'alex@example.com', 'values mode records the real PII');
+});
+
+test('/logs detail (types): records the entity type + token but NEVER the value', async () => {
+  const e = await sendAndGetLog({ logDetail: 'types' });
+  const [d] = e.detail;
+  assert.equal(d.type, 'EMAIL');
+  assert.equal(d.token, 'EMAIL_1');
+  assert.ok(!('value' in d), 'types mode must not leak the real value');
+  // Belt-and-suspenders: the raw email must not appear anywhere in the payload.
+  assert.doesNotMatch(JSON.stringify(e), /alex@example\.com/);
+});
+
+test('/logs detail: off by default — counts only, no breakdown', async () => {
+  const e = await sendAndGetLog({}); // logDetail omitted → redactionDetail() returns undefined
+  assert.equal(e.redacted, 1);
+  assert.equal(e.detail, undefined, 'no detail captured when logDetail is off');
+});
+
+test('logging OFF: no /logs entries and no timing work (zero added latency)', async () => {
+  const up = await fakeUpstream((body, req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+  });
+  const gw = createGateway({ ...cfg(`http://127.0.0.1:${up.port}`), logRequests: false });
+  const port = await listen(gw);
+  await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: 'mail alex@example.com' }] }),
+  });
+  const logs = await (await fetch(`http://127.0.0.1:${port}/logs`)).json();
+  assert.deepEqual(logs.entries, [], 'logRequests:false → nothing recorded, no trace built');
+  gw.close(); up.close();
+});
+
+// The whole privacy round-trip, including the optional tool branch, walked stage
+// by stage — and proof that each leg is timed in the log. In the API model a tool
+// round-trip is two requests:
+//   ① prompt → harness[redact] → model input → model output(tool_call)
+//      → harness[restore] → tool input (REAL values the client executes)
+//   ② tool output → harness[redact] → model input → model output
+//      → harness[restore] → user response
+test('full flow: redact → model → restore tool args → re-redact tool result → restore reply, each leg timed', async () => {
+  let turn = 0;
+  const seen = [];
+  const up = await fakeUpstream((body, req, res) => {
+    const j = JSON.parse(body); seen.push(j);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (turn++ === 0) {
+      // ① model echoes the redacted email placeholder back inside a tool call.
+      const tok = JSON.stringify(j).match(/\[\[EMAIL_1\]\]/)[0];
+      res.end(JSON.stringify({ choices: [{ finish_reason: 'tool_calls', message: { role: 'assistant', content: 'looking up',
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'lookup', arguments: JSON.stringify({ addr: tok }) } }] } }] }));
+    } else {
+      // ② after the client runs the tool, the model replies referencing the
+      //    (re-redacted) tool-result email. The fresh vault assigns EMAIL_1 to the
+      //    original prompt's address and EMAIL_2 to the tool result — echo EMAIL_2.
+      const tok = JSON.stringify(j).match(/\[\[EMAIL_2\]\]/)[0];
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: `done: ${tok}` } }] }));
+    }
+  });
+  const gw = createGateway({ ...cfg(`http://127.0.0.1:${up.port}`), logRequests: true });
+  const port = await listen(gw);
+
+  // ① prompt with PII → tool call with the REAL email restored for the client.
+  const r1 = await (await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: 'email alex@example.com please' }] }),
+  })).json();
+  assert.doesNotMatch(JSON.stringify(seen[0]), /alex@example\.com/, '① model input is redacted');
+  const args = JSON.parse(r1.choices[0].message.tool_calls[0].function.arguments);
+  assert.equal(args.addr, 'alex@example.com', '① tool input gets the REAL value (harness restore)');
+
+  // ② client runs the tool; its OUTPUT carries a fresh PII value that must be
+  //    re-redacted before the model sees it, then restored in the final reply.
+  const r2 = await (await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'x', messages: [
+      { role: 'user', content: 'email alex@example.com please' },
+      { role: 'assistant', content: 'looking up', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'lookup', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'c1', content: 'contact: support@acme.com' },
+    ] }),
+  })).json();
+  assert.doesNotMatch(JSON.stringify(seen[1]), /support@acme\.com/, '② tool output is re-redacted before the model');
+  assert.match(r2.choices[0].message.content, /support@acme\.com/, '② final reply is restored for the user');
+
+  // Each leg is timed in the log (async commit already flushed by now).
+  const logs = await (await fetch(`http://127.0.0.1:${port}/logs`)).json();
+  assert.equal(logs.entries.length, 2, 'both turns logged');
+  for (const e of logs.entries) {
+    for (const stage of ['redact', 'upstream', 'restore', 'total']) {
+      assert.equal(typeof e.timings?.[stage], 'number', `each turn times the ${stage} stage`);
+    }
+    assert.ok(e.timings.total >= e.timings.upstream, 'total spans the model hop');
+  }
+  gw.close(); up.close();
+});
