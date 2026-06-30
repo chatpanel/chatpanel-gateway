@@ -103,7 +103,7 @@ const STARTED_AT = Date.now();
 // Render a timings map as a compact one-liner for the console log.
 function fmtTimings(t) {
   if (!t) return '';
-  const label = { redact: 'redact', upstream: 'model', restore: 'restore', total: 'total' };
+  const label = { redact: 'redact', upstream: 'model', stream: 'stream', restore: 'restore', total: 'total' };
   return Object.keys(t).map((k) => `${label[k] || k} ${t[k]}ms`).join(' · ');
 }
 
@@ -114,8 +114,11 @@ function fmtTimings(t) {
 // been handed back, so recording (and the console line) never sits on the request
 // path. `timings` are wall-clock ms per stage of the flow:
 //   redact   prompt → harness[redact] → model input
-//   upstream model input → model output  (network + inference; usually dominant)
-//   restore  model output → harness[restore] → user response
+//   upstream model input → model output. Non-stream: full call. Stream: time to
+//            first token (model/connection latency). Shown as "model".
+//   stream   first token → last token (generation), streaming responses only
+//   restore  model output → harness[restore] → user response (non-stream; for
+//            streams restore is inline per chunk, so it's folded into stream)
 //   total    end-to-end through the gateway
 function mkTrace(sink) {
   const start = performance.now();
@@ -260,23 +263,32 @@ function forwardHeaders(headers, base) {
 // ---- backend: bridge -------------------------------------------------------
 
 // Stream the bridge SSE through the OpenAI shaper, parking on a tool call.
-async function pumpRelay(res, s, shaper) {
+// `trace` (when present) times the agent turn: 'upstream' = time to first token,
+// 'stream' = first token → park/done. The turn ends at a tool-call (parked, the
+// client runs the tool and POSTs back, resuming a fresh trace) or at onDone.
+async function pumpRelay(res, s, shaper, trace) {
   const restorer = makeTokenRestorer(s.vault);
+  const t0 = trace ? trace.clock() : 0;
+  let sStart = t0;
+  let first = true;
+  const tick = () => { if (trace && first) { trace.lap('upstream', t0); sStart = trace.clock(); first = false; } };
   await pumpBridgeStream(s, {
-    onText: (text) => { const r = restorer.push(text); if (r) res.write(shaper.sseDelta(r)); },
+    onText: (text) => { tick(); const r = restorer.push(text); if (r) res.write(shaper.sseDelta(r)); },
     onToolRequest: ({ name, restoredArgs, toolId }) => {
+      tick();
       const tail = restorer.flush(); if (tail) res.write(shaper.sseDelta(tail));
       res.write(shaper.sseToolCalls([{ id: toolId, name, arguments: JSON.stringify(restoredArgs) }]));
       res.write(shaper.sseToolFinish());
-      res.end(); // park: turn ends with tool_calls; the session stays alive for the follow-up
+      if (trace) trace.lap('stream', sStart);
+      res.end(); trace?.commit(); // park: turn ends with tool_calls; the session stays alive for the follow-up
     },
-    onDone: () => { const tail = restorer.flush(); if (tail) res.write(shaper.sseDelta(tail)); res.write(shaper.sseTail()); res.end(); endRelaySession(s.id); },
-    onError: (e) => { res.write(`data: ${JSON.stringify({ error: { message: e.message, type: 'bridge_error' } })}\n\n`); res.end(); endRelaySession(s.id); },
+    onDone: () => { const tail = restorer.flush(); if (tail) res.write(shaper.sseDelta(tail)); res.write(shaper.sseTail()); if (trace) trace.lap('stream', sStart); res.end(); endRelaySession(s.id); trace?.commit(); },
+    onError: (e) => { res.write(`data: ${JSON.stringify({ error: { message: e.message, type: 'bridge_error' } })}\n\n`); res.end(); endRelaySession(s.id); trace?.commit(); },
   });
 }
 
 // New tool-enabled turn: open the bridge with the client's tools as MCP specs.
-async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, isPro, tools, harness = null) {
+async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, isPro, tools, harness = null, trace = null) {
   const { messages, system } = adapter.toTurn(body);
   const token = readBridgeToken(cfg.bridge.token);
   const shaper = shaperFor(kind, body?.model || agent);
@@ -288,21 +300,26 @@ async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, 
   let resp;
   try {
     resp = await openBridgeChat({ bridgeUrl: cfg.bridge.url, agent, token, messages, system, specs: toolsToSpecs(tools), options: {}, signal: undefined });
-  } catch (e) { clearTimeout(ttl); endRelaySession(s.id); return sendJson(res, 502, { error: { message: `bridge: ${e.message}`, type: 'bridge_error' } }); }
+  } catch (e) { clearTimeout(ttl); endRelaySession(s.id); trace?.commit(); return sendJson(res, 502, { error: { message: `bridge: ${e.message}`, type: 'bridge_error' } }); }
   s.reader = resp.body.getReader();
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
   res.write(shaper.sseHead());
-  return pumpRelay(res, s, shaper);
+  return pumpRelay(res, s, shaper, trace);
 }
 
 // Follow-up turn carrying a tool result: feed it to the parked agent + resume.
-async function resumeRelay(res, s, toolContent, model) {
-  try { await deliverToolResult(s, toolContent); }
-  catch (e) { endRelaySession(s.id); return sendJson(res, 502, { error: { message: `tool-result: ${e.message}`, type: 'bridge_error' } }); }
+// The relay redacts the tool result with ITS vault (the main handler skips
+// redaction for a relay-resume), so time that here as the 'redact' leg.
+async function resumeRelay(res, s, toolContent, model, trace = null) {
+  try {
+    const rd0 = trace ? trace.clock() : 0;
+    await deliverToolResult(s, toolContent);
+    if (trace) trace.lap('redact', rd0);
+  } catch (e) { endRelaySession(s.id); trace?.commit(); return sendJson(res, 502, { error: { message: `tool-result: ${e.message}`, type: 'bridge_error' } }); }
   const shaper = shaperFor('openai', model || 'codex');
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
   res.write(shaper.sseHead());
-  return pumpRelay(res, s, shaper);
+  return pumpRelay(res, s, shaper, trace);
 }
 
 async function handleBridge(req, res, { kind, adapter, redactable, pathname, agentOverride, harness, trace }, body, vault, cfg, isPro) {
@@ -313,19 +330,18 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
 
   // Tool relay (OpenAI protocol + agent destinations). A follow-up request carries
   // a tool result for a parked session; a new request with `tools` starts one.
-  // The relay streams its own multi-turn flow; commit the trace now with the
-  // redaction timing known so far (fine-grained relay spans are a future add).
+  // The relay streams its own multi-turn flow and commits the trace when its turn
+  // ends (parked on a tool call, or done).
   if (kind === 'openai') {
     const toolResult = adapter.extractLatestToolResult(body);
     if (toolResult) {
       const parsed = parseToolCallId(toolResult.tool_call_id);
       const s = parsed && getRelaySession(parsed.gwId);
-      if (s) { trace?.commit(); return resumeRelay(res, s, toolResult.content, body?.model); }
+      if (s) return resumeRelay(res, s, toolResult.content, body?.model, trace);
     }
     const tools = adapter.extractTools(body);
     if (tools.length && body?.stream === true) {
-      trace?.commit();
-      return startRelay(req, res, { kind, adapter, agent: agentOverride || pickAgent(body?.model, cfg) }, body, vault, cfg, isPro, tools, harness);
+      return startRelay(req, res, { kind, adapter, agent: agentOverride || pickAgent(body?.model, cfg) }, body, vault, cfg, isPro, tools, harness, trace);
     }
   }
 
@@ -361,10 +377,11 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
   res.write(shaper.sseHead());
   const restorer = makeTokenRestorer(vault);
   const up0 = trace ? trace.clock() : 0;
+  let sStart = up0;
   try {
     let first = true;
     await streamBridgeChat(turn, (chunk) => {
-      if (trace && first) { trace.lap('upstream', up0); first = false; } // time-to-first-byte
+      if (trace && first) { trace.lap('upstream', up0); sStart = trace.clock(); first = false; } // time-to-first-token
       const restored = restorer.push(chunk);
       if (restored) res.write(shaper.sseDelta(restored));
     });
@@ -374,6 +391,7 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
   } catch (e) {
     res.write(`data: ${JSON.stringify({ error: { message: e.message, type: 'bridge_error' } })}\n\n`);
   }
+  if (trace) trace.lap('stream', sStart);
   res.end();
   trace?.commit();
 }
@@ -406,16 +424,17 @@ async function handleApi(req, res, { adapter, kind, pathname, search, base, dest
   upstream.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k.toLowerCase())) resHeaders[k] = v; });
 
   if (ct.includes('text/event-stream') && upstream.body) {
-    if (trace) trace.lap('upstream', up0); // time-to-first-byte; restore is inline as the stream flows
+    if (trace) trace.lap('upstream', up0); // model latency to response headers
+    const sStart = trace ? trace.clock() : 0;
     res.writeHead(upstream.status, resHeaders);
     // OpenAI streaming: restore tool-call args via the harness (real, or kept
     // redacted for remote MCP under redactRemote) while keeping visible text
-    // pseudonymized. Other protocols: generic restore. Commit the trace once the
-    // stream finishes (total then spans the whole streamed response).
+    // pseudonymized. Other protocols: generic restore. The 'stream' leg spans
+    // the body; commit once it finishes (total then covers the whole response).
     const piped = kind === 'openai'
       ? pipeRestoredOpenAIStream(upstream.body, res, vault, harness)
       : pipeRestoredStream(upstream.body, res, vault);
-    return Promise.resolve(piped).finally(() => trace?.commit());
+    return Promise.resolve(piped).finally(() => { if (trace) trace.lap('stream', sStart); trace?.commit(); });
   }
 
   const buf = Buffer.from(await upstream.arrayBuffer());

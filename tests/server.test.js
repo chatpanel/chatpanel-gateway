@@ -246,6 +246,28 @@ test('/logs detail: off by default — counts only, no breakdown', async () => {
   assert.equal(e.detail, undefined, 'no detail captured when logDetail is off');
 });
 
+test('streaming: timing splits into model (time-to-first-token) + stream (generation)', async () => {
+  const up = await fakeUpstream((body, req, res) => {
+    const token = JSON.parse(body).messages[0].content.match(/\[\[EMAIL_1\]\]/)[0];
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(`data: {"choices":[{"delta":{"content":"to ${token}"}}]}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
+  });
+  const gw = createGateway({ ...cfg(`http://127.0.0.1:${up.port}`), logRequests: true });
+  const port = await listen(gw);
+  await (await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ stream: true, messages: [{ role: 'user', content: 'mail alex@example.com' }] }),
+  })).text();
+  const logs = await (await fetch(`http://127.0.0.1:${port}/logs`)).json();
+  const e = logs.entries[0];
+  for (const stage of ['redact', 'upstream', 'stream', 'total']) {
+    assert.equal(typeof e.timings?.[stage], 'number', `streamed request times the ${stage} leg`);
+  }
+  gw.close(); up.close();
+});
+
 test('logging OFF: no /logs entries and no timing work (zero added latency)', async () => {
   const up = await fakeUpstream((body, req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
