@@ -37,7 +37,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.9';
+export const VERSION = '0.6.10';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -712,6 +712,20 @@ export function start(cfg = loadConfig()) {
   // revoked subscription drops the gateway to Free instead of riding the offline
   // token to its exp (see entitlement-refresh.js).
   const entitlement = startEntitlementRefresh(cfg);
+  // Fail LOUD on a port clash instead of crashing with a raw stack trace. We bind a
+  // FIXED port (4320) so the extension / install.sh / OpenCode can always find us; if
+  // something else already holds it, tell the user exactly how to recover (pick a new
+  // port, restart, and point the extension's Gateway tab at it) rather than silently
+  // dying or drifting to a random port.
+  server.on('error', (e) => {
+    if (e && e.code === 'EADDRINUSE') {
+      console.error(`Port ${cfg.port} is already in use — another app (or a second gateway) has it.`);
+      console.error(`Fix: free the port, or set a different one — edit "port" in ${configPath()} (or the extension's Gateway tab) and restart. The extension must point at the same port.`);
+      process.exit(1);
+    }
+    console.error(`Gateway server error: ${e?.message || e}`);
+    process.exit(1);
+  });
   server.listen(cfg.port, cfg.host, () => {
     console.log(`ChatPanel Privacy Gateway v${VERSION} on http://${cfg.host}:${cfg.port}`);
     console.log(`  backend  : ${cfg.backend}` + (cfg.backend === 'bridge' ? ` (agent: ${cfg.bridge.agent}, via ${cfg.bridge.url})` : ''));

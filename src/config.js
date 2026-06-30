@@ -139,5 +139,16 @@ export function loadConfig(env = process.env) {
   if (env.ANTHROPIC_BASE_URL) cfg = deepMerge(cfg, { upstreams: { anthropic: { baseUrl: env.ANTHROPIC_BASE_URL } } });
   if (env.CHATPANEL_REDACTION_TIER) cfg = deepMerge(cfg, { redaction: { tier: env.CHATPANEL_REDACTION_TIER } });
 
+  // A persisted port of 0 means "let the OS pick a random port" — fatal for a
+  // service that clients reach at a FIXED address: the extension, install.sh, and
+  // OpenCode/Pi all hardcode 4320. A stale/corrupt config that wrote 0 would bind a
+  // random ephemeral port and look "running but unreachable". Coerce 0 / NaN / out-
+  // of-range back to the default so the gateway is always where clients expect it.
+  const p = Number(cfg.port);
+  if (!Number.isInteger(p) || p < 1 || p > 65535) {
+    if (cfg.port !== DEFAULTS.port) console.warn(`[gateway] ignoring invalid port ${JSON.stringify(cfg.port)} — using ${DEFAULTS.port}`);
+    cfg = deepMerge(cfg, { port: DEFAULTS.port });
+  }
+
   return cfg;
 }
