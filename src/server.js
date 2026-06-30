@@ -27,6 +27,7 @@ import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
 import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
 import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
+import { installTimestampedConsole } from './log.js';
 import * as nerEngine from './ner-engine.js';
 import { MODEL_CATALOG, isKnownModel } from './models.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
@@ -36,7 +37,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.8';
+export const VERSION = '0.6.9';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -704,6 +705,7 @@ export function createGateway(cfg = loadConfig()) {
 }
 
 export function start(cfg = loadConfig()) {
+  installTimestampedConsole(); // every gateway log line gets a clock — before anything logs
   const server = createGateway(cfg);
   const ner = startNer(cfg); // may mutate cfg.redaction when it comes up
   // Re-validate the stored Pro entitlement online on an interval, so a refunded /
