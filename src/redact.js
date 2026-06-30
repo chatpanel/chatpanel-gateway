@@ -8,22 +8,24 @@
 // mapping is self-consistent within the request. (Same reasoning as the
 // extension's pii-pipeline.)
 
-import { createVault, redactText, detectEntities, effectiveTier, gatedDictionary } from '@chatpanel/pii';
+import { createVault, redactText, detectEntities, gatedDictionary } from '@chatpanel/pii';
 import * as engine from './ner-engine.js';
 
 // tier: 'basic' | 'full'. For 'full' we run the local detector over the combined
 // text to harvest names/orgs, then redact every segment against that entity set.
-// `isPro` applies the SAME free/Pro gating as the extension (shared package):
-// free → deterministic 'basic' tier + a capped dictionary; Pro → full tier.
+//
+// Free vs Pro on the gateway: the free trial is limited by a REQUEST QUOTA
+// (freegate.js), not by downgrading quality — so free users get the REAL tier
+// (names/orgs via NER) within their allowance. The custom dictionary, though, is
+// still a Pro power feature: gatedDictionary caps it to FREE_DICT_LIMIT for free.
 export async function redactSegments(segments, redactionCfg, { signal, isPro = true } = {}) {
   const vault = createVault();
   const texts = segments.map((s) => s.get()).filter((t) => typeof t === 'string' && t);
   if (texts.length === 0) return { vault, count: 0 };
 
-  // effectiveTier downgrades 'full'→'basic' for free; gatedDictionary trims to the
-  // free limit. This reuses chatpanel-pii's gating so the gateway and extension
-  // enforce free/Pro identically.
-  const tier = effectiveTier({ tier: redactionCfg.tier }, isPro);
+  // Use the configured tier as-is (no free downgrade — the quota is the free gate),
+  // but keep the dictionary capped for free via the shared chatpanel-pii gate.
+  const tier = redactionCfg.tier === 'full' ? 'full' : 'basic';
   const dictionary = gatedDictionary(redactionCfg, isPro);
 
   // Detection source: a USER-configured external detector takes precedence; else

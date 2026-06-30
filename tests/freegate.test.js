@@ -1,12 +1,16 @@
-// Free-tier "taste" gate: without a Pro entitlement token, redaction is
-// deterministic-only and metered to a daily cap; the request past the cap is
-// refused with an upsell. (Pro-token verification is exercised by entitlement.js;
-// here we prove the metering + the free/basic downgrade.)
+// Free-tier "taste" gate: without a Pro entitlement token, the gateway still does
+// genuine full-tier redaction, but only for a FIXED LIFETIME allowance
+// (freegate.FREE_TOTAL_CAP). A credit is burned only when a request actually
+// redacts something; once the allowance is gone, requests are refused with an
+// upsell. (Pro-token verification is exercised by entitlement.js.)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { mkdtempSync } from 'node:fs';
 import { createGateway } from '../src/server.js';
-import { redactSegments, segment } from '../src/redact.js';
+import { checkQuota, consume, usage, FREE_TOTAL_CAP } from '../src/freegate.js';
 
 function listen(server) {
   return new Promise((res) => server.listen(0, '127.0.0.1', () => res(server.address().port)));
@@ -21,39 +25,56 @@ function post(port, body) {
     req.on('error', reject); req.write(data); req.end();
   });
 }
-
-test('free tier: requests past the daily cap are refused (402 upsell)', async () => {
-  const gw = createGateway({
+function baseCfg(free) {
+  return {
     host: '127.0.0.1', port: 0, backend: 'bridge',
     bridge: { url: 'http://127.0.0.1:1', agent: 'codex', token: '' },
     upstreams: { openai: {}, anthropic: {} },
-    redaction: { tier: 'basic', dictionary: [], detection: { backend: 'off' } },
+    redaction: { tier: 'basic', dictionary: [], detection: { backend: 'off' }, redactSystem: true },
     ner: { autostart: false }, allowedOrigins: [], maxBodyBytes: 1 << 20,
-    pro: { entitlementToken: '', free: { maxRequestsPerDay: 2 } }, logRequests: false,
-  });
-  const port = await listen(gw);
-  // bridge is unreachable, but the meter runs BEFORE the bridge call; the first
-  // two are allowed (then fail at the bridge → 502), the third is refused (402).
-  const r1 = await post(port, { messages: [{ role: 'user', content: 'hi' }] });
-  const r2 = await post(port, { messages: [{ role: 'user', content: 'hi' }] });
-  const r3 = await post(port, { messages: [{ role: 'user', content: 'hi' }] });
-  assert.notEqual(r1.status, 402);
-  assert.notEqual(r2.status, 402);
-  assert.equal(r3.status, 402);
-  assert.match(r3.body, /free limit/i);
-  gw.close();
+    pro: { entitlementToken: '', free }, logRequests: false,
+  };
+}
+
+test('freegate: a fixed lifetime allowance, consumed per redaction; Pro is never gated', () => {
+  const cfg = { pro: { entitlementToken: '', free: { used: FREE_TOTAL_CAP - 1 } } };
+  assert.equal(checkQuota(cfg, false).allowed, true);   // one credit left
+  consume(cfg, false);
+  assert.equal(cfg.pro.free.used, FREE_TOTAL_CAP);
+  assert.equal(checkQuota(cfg, false).allowed, false);  // trial used up
+  assert.equal(usage(cfg).remaining, 0);
+  // Pro is always allowed and never consumes.
+  assert.equal(checkQuota(cfg, true).allowed, true);
+  consume(cfg, true);
+  assert.equal(cfg.pro.free.used, FREE_TOTAL_CAP);
 });
 
-test('free tier downgrades full→basic (no entity redaction without Pro)', async () => {
-  // With isPro=false, even a configured 'full' tier must not pull in entities.
-  const body = [{ role: 'user', content: 'Alex Rivera emailed a@b.io' }];
-  const seg = (m) => segment(() => m.content, (v) => { m.content = v; });
-  const segs = body.map(seg);
-  const { count } = await redactSegments(segs, {
-    tier: 'full', dictionary: [], detection: { backend: 'off' },
-  }, { isPro: false });
-  // The email is redacted deterministically; the name is NOT (entity tier is Pro).
-  assert.match(body[0].content, /\[\[EMAIL_1\]\]/);
-  assert.match(body[0].content, /Alex Rivera/);
-  assert.equal(count, 1);
+test('free tier: a credit is burned only when something is actually redacted', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'gw-free-'));
+  const prev = process.env.CHATPANEL_GATEWAY_CONFIG;
+  process.env.CHATPANEL_GATEWAY_CONFIG = path.join(dir, 'gateway.config.json');
+  const cfg = baseCfg({ used: 0 });
+  const gw = createGateway(cfg);
+  const port = await listen(gw);
+  // bridge is unreachable (→ 502), but redaction + metering run first.
+  await post(port, { messages: [{ role: 'user', content: 'hello there' }] }); // no PII → no charge
+  assert.equal(cfg.pro.free.used, 0);
+  await post(port, { messages: [{ role: 'user', content: 'mail me at a@b.io' }] }); // email redacted → 1 charge
+  assert.equal(cfg.pro.free.used, 1);
+  gw.close();
+  if (prev === undefined) delete process.env.CHATPANEL_GATEWAY_CONFIG; else process.env.CHATPANEL_GATEWAY_CONFIG = prev;
+});
+
+test('free tier: requests past the lifetime allowance are refused (402 upsell)', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'gw-free-'));
+  const prev = process.env.CHATPANEL_GATEWAY_CONFIG;
+  process.env.CHATPANEL_GATEWAY_CONFIG = path.join(dir, 'gateway.config.json');
+  const cfg = baseCfg({ used: FREE_TOTAL_CAP });
+  const gw = createGateway(cfg);
+  const port = await listen(gw);
+  const r = await post(port, { messages: [{ role: 'user', content: 'mail me at a@b.io' }] });
+  assert.equal(r.status, 402);
+  assert.match(r.body, /redactions|free trial/i);
+  gw.close();
+  if (prev === undefined) delete process.env.CHATPANEL_GATEWAY_CONFIG; else process.env.CHATPANEL_GATEWAY_CONFIG = prev;
 });

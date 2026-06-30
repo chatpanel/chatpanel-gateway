@@ -1,20 +1,28 @@
 // Free vs Pro for the gateway runtime — the "taste" gate.
 //
-// Free (no entitlement token): deterministic redaction only (basic tier) + a
-// capped number of metered requests per day, so anyone can try it. Pro (a valid
-// ChatPanel entitlement token — the same offline-signed token the extension and
-// bridge use) unlocks full-tier redaction (names/orgs via NER + full dictionary)
-// and unlimited usage. The cryptographic check (entitlement.js) means a forked UI
-// can't unlock it — only the configured/paid token does.
+// Free (no entitlement token): full-tier redaction works, but only for a fixed
+// LIFETIME number of redactions (FREE_TOTAL_CAP) — a real trial of the genuine
+// thing, then you buy. Pro (a valid ChatPanel entitlement token — the same
+// offline-signed token the extension and bridge use) unlocks UNLIMITED redaction.
+// The cryptographic check (entitlement.js) means a forked UI can't unlock it —
+// only the configured/paid token does.
+//
+// The cap is LIFETIME (overall), not per-day, and it is NOT user-editable — so a
+// free user gets exactly FREE_TOTAL_CAP genuine redactions, full stop. The count
+// persists in cfg.pro.free.used (written via configstore.persistConfig), so it
+// survives restarts.
 
 import { isProEntitled } from './entitlement.js';
 
-const proCache = { token: null, val: false };
-const counts = { day: '', n: 0 };
+// The lifetime free allowance. Fixed — deliberately NOT configurable.
+export const FREE_TOTAL_CAP = 25;
 
-// Today's metered usage — for the gateway's /status (the extension's monitoring).
+const proCache = { token: null, val: false };
+
+// Lifetime free usage — for the gateway's /status (the extension's monitoring).
 export function usage(cfg) {
-  return { day: counts.day, used: counts.n, cap: cfg.pro?.free?.maxRequestsPerDay ?? 25 };
+  const used = Number(cfg.pro?.free?.used) || 0;
+  return { used, cap: FREE_TOTAL_CAP, remaining: Math.max(0, FREE_TOTAL_CAP - used) };
 }
 
 export async function resolvePro(token) {
@@ -26,19 +34,23 @@ export async function resolvePro(token) {
   return val;
 }
 
-// UTC day bucket. (Runtime — Date is available here, unlike workflow scripts.)
-function dayKey() {
-  return new Date().toISOString().slice(0, 10);
+// May this request still redact? Pro = always. Free = allowed until the lifetime
+// cap is reached, then refused so the client gets a clear upsell. This only
+// CHECKS — the count is advanced by consume() AFTER a redaction actually happens,
+// so requests with nothing to redact don't burn the allowance.
+export function checkQuota(cfg, isPro) {
+  if (isPro) return { allowed: true, remaining: Infinity, isPro: true };
+  const used = Number(cfg.pro?.free?.used) || 0;
+  if (used >= FREE_TOTAL_CAP) return { allowed: false, remaining: 0, used, cap: FREE_TOTAL_CAP, isPro: false };
+  return { allowed: true, remaining: FREE_TOTAL_CAP - used, used, cap: FREE_TOTAL_CAP, isPro: false };
 }
 
-// Meter one redactable request. Pro = always allowed. Free = allowed until the
-// daily cap, then refused so the client gets a clear upsell.
-export function meter(cfg, isPro) {
-  if (isPro) return { allowed: true, remaining: Infinity, isPro: true };
-  const cap = cfg.pro?.free?.maxRequestsPerDay ?? 25;
-  const d = dayKey();
-  if (counts.day !== d) { counts.day = d; counts.n = 0; }
-  if (counts.n >= cap) return { allowed: false, remaining: 0, cap, isPro: false };
-  counts.n += 1;
-  return { allowed: true, remaining: cap - counts.n, cap, isPro: false };
+// Record one consumed free redaction (lifetime). No-op for Pro. Mutates cfg so
+// the caller can persist it. Returns the new used count.
+export function consume(cfg, isPro) {
+  if (isPro) return Infinity;
+  cfg.pro = cfg.pro || {};
+  cfg.pro.free = cfg.pro.free || {};
+  cfg.pro.free.used = (Number(cfg.pro.free.used) || 0) + 1;
+  return cfg.pro.free.used;
 }

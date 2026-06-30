@@ -5,6 +5,7 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import os from 'node:os';
+import { usage } from './freegate.js';
 
 // Default to a writable per-user location, NOT process.cwd(): when the gateway
 // runs as a login service its cwd is "/" (read-only → EROFS on save).
@@ -45,7 +46,9 @@ export function publicConfig(cfg, { proUnlocked = false } = {}) {
     },
     ner: cfg.ner,
     allowedOrigins: Array.isArray(cfg.allowedOrigins) ? cfg.allowedOrigins : [],
-    pro: { unlocked: proUnlocked, hasToken: !!cfg.pro?.entitlementToken, free: cfg.pro?.free },
+    // free = lifetime trial usage ({ used, cap, remaining }) — read-only; the cap
+    // is fixed and the count is server-authoritative (never settable from the UI).
+    pro: { unlocked: proUnlocked, hasToken: !!cfg.pro?.entitlementToken, free: usage(cfg) },
     logRequests: !!cfg.logRequests,
     logDetail: ['types', 'values'].includes(cfg.logDetail) ? cfg.logDetail : 'off',
     tools: {
@@ -102,8 +105,9 @@ export function applyConfigPatch(cfg, patch = {}) {
   if (Array.isArray(patch.allowedOrigins)) cfg.allowedOrigins = patch.allowedOrigins;
   if (patch.pro && typeof patch.pro === 'object') {
     if (typeof patch.pro.entitlementToken === 'string') cfg.pro.entitlementToken = patch.pro.entitlementToken;
-    const cap = patch.pro.free?.maxRequestsPerDay;
-    if (Number.isFinite(cap) && cap >= 0) cfg.pro.free.maxRequestsPerDay = cap;
+    // NOTE: the free trial is a FIXED lifetime cap (freegate.FREE_TOTAL_CAP) and
+    // its `used` count is server-authoritative — neither is editable here, so a
+    // client can't raise the cap or reset its own trial.
   }
   if (typeof patch.logRequests === 'boolean') cfg.logRequests = patch.logRequests;
   if (['off', 'types', 'values'].includes(patch.logDetail)) cfg.logDetail = patch.logDetail;

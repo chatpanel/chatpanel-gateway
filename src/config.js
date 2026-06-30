@@ -34,14 +34,16 @@ const DEFAULTS = {
   allowedOrigins: [],
   maxBodyBytes: 26214400,
 
-  // Monetization: the gateway is free to try, paid to rely on. Free = deterministic
-  // redaction (basic tier) + a daily request cap. Paste a ChatPanel Pro entitlement
-  // token (the same offline-signed token the extension/bridge use) to unlock
-  // full-tier redaction (NER names/orgs + full dictionary) and unlimited usage.
+  // Monetization: the gateway is free to try, paid to rely on. Free = full-tier
+  // redaction (the real thing — NER names/orgs + dictionary) for a FIXED LIFETIME
+  // allowance (freegate.FREE_TOTAL_CAP redactions), then it stops. Paste a
+  // ChatPanel Pro entitlement token (the same offline-signed token the extension/
+  // bridge use) to unlock unlimited usage. `free.used` is the running lifetime
+  // count (server-authoritative; persisted here so it survives restarts).
   pro: {
     entitlementToken: '',
     free: {
-      maxRequestsPerDay: 25,
+      used: 0,
     },
   },
 

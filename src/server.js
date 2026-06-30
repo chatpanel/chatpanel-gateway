@@ -21,14 +21,14 @@ import { createServer } from 'node:http';
 import { loadConfig } from './config.js';
 import { redactSegments } from './redact.js';
 import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer } from './stream.js';
-import { restoreText, effectiveTier, gatedDictionary, narrowSpecs, makeToolHarness, placeholderToolNote } from '@chatpanel/pii';
+import { restoreText, gatedDictionary, narrowSpecs, makeToolHarness, placeholderToolNote } from '@chatpanel/pii';
 import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
 import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
 import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
 import * as nerEngine from './ner-engine.js';
 import { MODEL_CATALOG, isKnownModel } from './models.js';
-import { resolvePro, meter, usage } from './freegate.js';
+import { resolvePro, checkQuota, consume, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, persistConfig, configPath } from './configstore.js';
 import { resolveDestination, aggregateModelsAsync } from './router.js';
 import * as openai from './openai.js';
@@ -292,7 +292,9 @@ async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, 
   const { messages, system } = adapter.toTurn(body);
   const token = readBridgeToken(cfg.bridge.token);
   const shaper = shaperFor(kind, body?.model || agent);
-  const redactOpts = { tier: effectiveTier({ tier: cfg.redaction.tier }, isPro), dictionary: gatedDictionary(cfg.redaction, isPro), entities: [] };
+  // Full tier for everyone here (the free allowance is enforced by the quota gate
+  // in the main handler), but the custom dictionary stays capped for free.
+  const redactOpts = { tier: cfg.redaction.tier === 'full' ? 'full' : 'basic', dictionary: gatedDictionary(cfg.redaction, isPro), entities: [] };
   const s = createRelaySession({ vault, redactOpts, bridgeUrl: cfg.bridge.url, token, harness });
   const ttl = setTimeout(() => endRelaySession(s.id), 135_000); // bridge tool-call timeout is 120s
   // The placeholder note is already in `system` (injected into the body after
@@ -634,12 +636,14 @@ export function createGateway(cfg = loadConfig()) {
           body.tools = narrowSpecs(body.tools, latestUserText(body, r.kind), { cap, keep, name: toolName, description: toolDesc });
           narrowedTools = before - body.tools.length;
         }
-        // Free/Pro gate: meter the request and pick the effective tier.
+        // Free/Pro gate: free users get the REAL thing (full-tier redaction), but
+        // only for a fixed lifetime allowance — checked here, consumed below once a
+        // redaction actually happens. Over the cap → 402 upsell.
         isPro = await resolvePro(cfg.pro?.entitlementToken);
-        const allow = meter(cfg, isPro);
+        const allow = checkQuota(cfg, isPro);
         if (!allow.allowed) {
           return sendJson(res, 402, { error: {
-            message: `ChatPanel Gateway free limit reached (${allow.cap}/day). Add a ChatPanel Pro entitlement token to unlock unlimited usage + full-tier redaction (names/orgs).`,
+            message: `ChatPanel Gateway free trial used up (${allow.cap} redactions). Add a ChatPanel Pro entitlement token to unlock unlimited full-tier redaction (names/orgs).`,
             type: 'free_limit_reached',
           } });
         }
@@ -647,10 +651,19 @@ export function createGateway(cfg = loadConfig()) {
         const ac = new AbortController();
         req.on('close', () => ac.abort());
         const rd0 = trace ? trace.clock() : 0;
+        // Redact at the configured tier for everyone (free users get genuine
+        // name/org redaction within their allowance, not a downgraded preview);
+        // the custom dictionary stays capped for free (isPro decides that inside).
         const { vault: v, count } = await redactSegments(segs, cfg.redaction, { signal: ac.signal, isPro });
         if (trace) trace.lap('redact', rd0);
         vault = v;
         redactedCount = count;
+        // Burn one lifetime free credit only when we actually redacted something,
+        // then persist so the count survives a restart. (No-op / no write for Pro.)
+        if (!isPro && count > 0) {
+          consume(cfg, isPro);
+          try { persistConfig(cfg, configPath()); } catch { /* best effort — usage is advisory */ }
+        }
         // When tools are armed, tell the model placeholders are auto-restored for
         // tools (so privacy-aware models USE them instead of refusing). Injected
         // AFTER redaction so the note isn't itself redacted. Covers BOTH the API
