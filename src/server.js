@@ -137,7 +137,7 @@ function mkTrace(sink) {
       const entry = /** @type {any} */ ({ ...this.meta, timings });
       setImmediate(() => {
         sink(entry);
-        console.log(`[gateway] model=${entry.model || '-'} → ${entry.dest ? `${entry.dest}(${entry.type})` : 'none'} · redacted ${entry.redacted || 0}${entry.narrowed ? ` · narrowed -${entry.narrowed}` : ''} · ${fmtTimings(timings)}`);
+        console.log(`[gateway] model=${entry.model || '-'} → ${entry.dest ? `${entry.dest}(${entry.type})` : 'none'} · redacted ${entry.redacted || 0}${entry.sanitized ? ` · scrubbed ${entry.sanitized} hidden` : ''}${entry.narrowed ? ` · narrowed -${entry.narrowed}` : ''} · ${fmtTimings(timings)}`);
       });
     },
   };
@@ -613,6 +613,7 @@ export function createGateway(cfg = loadConfig()) {
     let body = null;
     let outBody = raw;
     let redactedCount = 0;
+    let sanitizedCount = 0;
     let narrowedTools = 0;
     let isPro = true;
     // Off the hot path: only build a trace when logging is on, so it adds nothing
@@ -656,10 +657,11 @@ export function createGateway(cfg = loadConfig()) {
         // Redact at the configured tier for everyone (free users get genuine
         // name/org redaction within their allowance, not a downgraded preview);
         // the custom dictionary stays capped for free (isPro decides that inside).
-        const { vault: v, count } = await redactSegments(segs, cfg.redaction, { signal: ac.signal, isPro });
+        const { vault: v, count, sanitized } = await redactSegments(segs, cfg.redaction, { signal: ac.signal, isPro });
         if (trace) trace.lap('redact', rd0);
         vault = v;
         redactedCount = count;
+        sanitizedCount = sanitized || 0;
         // Burn one lifetime free credit only when we actually redacted something,
         // then persist so the count survives a restart. (No-op / no write for Pro.)
         if (!isPro && count > 0) {
@@ -687,7 +689,7 @@ export function createGateway(cfg = loadConfig()) {
     // API we forward to). Falls back to the legacy backend when none configured.
     const dest = resolveDestination(body?.model, cfg, r.kind);
     if (trace) {
-      trace.meta = { t: Date.now(), model: body?.model || null, dest: dest ? dest.id : null, type: dest ? dest.type : null, redacted: redactedCount, narrowed: narrowedTools, detail: redactionDetail(vault, cfg.logDetail) };
+      trace.meta = { t: Date.now(), model: body?.model || null, dest: dest ? dest.id : null, type: dest ? dest.type : null, redacted: redactedCount, sanitized: sanitizedCount, narrowed: narrowedTools, detail: redactionDetail(vault, cfg.logDetail) };
     }
     if (dest && dest.type === 'api') {
       if (!dest.baseUrl) { trace?.commit(); return sendJson(res, 502, { error: `destination "${dest.id}" has no baseUrl` }); }

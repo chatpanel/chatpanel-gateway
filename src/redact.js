@@ -8,7 +8,7 @@
 // mapping is self-consistent within the request. (Same reasoning as the
 // extension's pii-pipeline.)
 
-import { createVault, redactText, detectEntities, gatedDictionary } from '@chatpanel/pii';
+import { createVault, redactText, detectEntities, gatedDictionary, sanitizeUnicode } from '@chatpanel/pii';
 import * as engine from './ner-engine.js';
 
 // tier: 'basic' | 'full'. For 'full' we run the local detector over the combined
@@ -20,8 +20,23 @@ import * as engine from './ner-engine.js';
 // still a Pro power feature: gatedDictionary caps it to FREE_DICT_LIMIT for free.
 export async function redactSegments(segments, redactionCfg, { signal, isPro = true } = {}) {
   const vault = createVault();
+
+  // De-steganography FIRST (before detection). Invisible/format Unicode is a triple
+  // threat at this boundary: it can split a value so the detector misses it and the
+  // model reassembles real PII (redaction bypass), smuggle a hidden instruction via
+  // Tag chars (ASCII smuggling), or carry a fingerprint/watermark a client injected.
+  // We strip it in place so detection sees clean text and the forwarded request is
+  // clean too. Counted (not silently dropped) so the server can report it.
+  let sanitized = 0;
+  for (const seg of segments) {
+    const before = seg.get();
+    if (typeof before !== 'string' || !before) continue;
+    const { clean, removed } = sanitizeUnicode(before);
+    if (removed) { seg.set(clean); sanitized += removed; }
+  }
+
   const texts = segments.map((s) => s.get()).filter((t) => typeof t === 'string' && t);
-  if (texts.length === 0) return { vault, count: 0 };
+  if (texts.length === 0) return { vault, count: 0, sanitized };
 
   // Use the configured tier as-is (no free downgrade — the quota is the free gate),
   // but keep the dictionary capped for free via the shared chatpanel-pii gate.
@@ -64,7 +79,7 @@ export async function redactSegments(segments, redactionCfg, { signal, isPro = t
     if (after !== before) count++;
     seg.set(after);
   }
-  return { vault, count };
+  return { vault, count, sanitized };
 }
 
 // A `segment` is a tiny getter/setter over wherever the text lives in the parsed
