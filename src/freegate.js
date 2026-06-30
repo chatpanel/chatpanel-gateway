@@ -15,7 +15,7 @@
 import { isProEntitled } from './entitlement.js';
 
 // The lifetime free allowance. Fixed — deliberately NOT configurable.
-export const FREE_TOTAL_CAP = 25;
+export const FREE_TOTAL_CAP = 100;
 
 const proCache = { token: null, val: false };
 

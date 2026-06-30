@@ -27,7 +27,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@chatpanel/pii": "^0.2.6",
+    "@chatpanel/pii": "^0.2.8",
     "@huggingface/transformers": "^4.2.0",
     "onnxruntime-web": "1.26.0-dev.20260416-b7804b056c"
   },

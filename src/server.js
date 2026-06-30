@@ -19,6 +19,7 @@
 
 import { createServer } from 'node:http';
 import { loadConfig } from './config.js';
+import { startEntitlementRefresh, maybeRevalidate } from './entitlement-refresh.js';
 import { redactSegments } from './redact.js';
 import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer } from './stream.js';
 import { restoreText, gatedDictionary, narrowSpecs, makeToolHarness, placeholderToolNote } from '@chatpanel/pii';
@@ -35,7 +36,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.5';
+export const VERSION = '0.6.6';
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -484,6 +485,7 @@ export function createGateway(cfg = loadConfig()) {
 
     // --- Config API (the extension's "Gateway" tab is a client of these) ---
     if (pathname === '/status' && req.method === 'GET') {
+      maybeRevalidate(cfg); // throttled, fire-and-forget: reflect a refund/revoke quickly
       const proUnlocked = await resolvePro(cfg.pro?.entitlementToken);
       const health = await probeNerHealth(cfg); // live GET /health on the detector
       return sendJson(res, 200, {
@@ -702,13 +704,17 @@ export function createGateway(cfg = loadConfig()) {
 export function start(cfg = loadConfig()) {
   const server = createGateway(cfg);
   const ner = startNer(cfg); // may mutate cfg.redaction when it comes up
+  // Re-validate the stored Pro entitlement online on an interval, so a refunded /
+  // revoked subscription drops the gateway to Free instead of riding the offline
+  // token to its exp (see entitlement-refresh.js).
+  const entitlement = startEntitlementRefresh(cfg);
   server.listen(cfg.port, cfg.host, () => {
     console.log(`ChatPanel Privacy Gateway v${VERSION} on http://${cfg.host}:${cfg.port}`);
     console.log(`  backend  : ${cfg.backend}` + (cfg.backend === 'bridge' ? ` (agent: ${cfg.bridge.agent}, via ${cfg.bridge.url})` : ''));
     console.log(`  redaction: ${cfg.redaction.tier}` + (cfg.redaction.detection?.backend && cfg.redaction.detection.backend !== 'off'
       ? ` + ${cfg.redaction.detection.backend} detector` : (cfg.ner?.autostart ? ' (+ NER starting…)' : '')));
   });
-  const shutdown = () => { ner?.stop(); server.close(() => process.exit(0)); };
+  const shutdown = () => { ner?.stop(); entitlement.stop(); server.close(() => process.exit(0)); };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
   return server;
