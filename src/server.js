@@ -28,7 +28,7 @@ import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream,
 import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
 import { installTimestampedConsole } from './log.js';
-import { SearchIndex } from './search-index.js';
+import { HistoryStore } from './history-store.js';
 import * as nerEngine from './ner-engine.js';
 import { MODEL_CATALOG, isKnownModel } from './models.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
@@ -38,12 +38,12 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.11';
+export const VERSION = '0.6.12';
 
-// WARM search tier — one BM25 index per gateway process, fed by the extension's ingest
-// sync. In-memory for now (rebuilt from the next sync on restart); encrypted-at-rest
-// persistence is the next slice. See docs/architecture-data-tiers.
-const historyIndex = new SearchIndex();
+// WARM search tier — one record store + BM25 index per gateway process, fed by the
+// extension's ingest sync. Encrypted at rest under ~/.chatpanel, loaded on start so a
+// restart doesn't need a full re-ingest (no cold start). See docs/architecture-data-tiers.
+const historyStore = new HistoryStore().load();
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -515,10 +515,12 @@ export function createGateway(cfg = loadConfig()) {
     //   POST /v1/history/ingest  { upserts:[{id,text,title,type,date}], removes:[id] } → { size }
     //   POST /v1/history/search  { query, limit } → { results }
     //   GET  /v1/history/status  → { size }
+    //   GET  /v1/history/list?limit&offset → { total, items:[{id,title,type,date,chars}] }
+    //   GET  /v1/history/get?id=… → { record:{id,title,type,date,text} }  (for external UIs)
     if (pathname === '/v1/history/ingest' && req.method === 'POST') {
       try {
         const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
-        const size = historyIndex.bulk({
+        const size = historyStore.bulk({
           upserts: Array.isArray(body.upserts) ? body.upserts : [],
           removes: Array.isArray(body.removes) ? body.removes : [],
         });
@@ -530,14 +532,24 @@ export function createGateway(cfg = loadConfig()) {
     if (pathname === '/v1/history/search' && req.method === 'POST') {
       try {
         const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
-        const results = historyIndex.search(String(body.query || ''), { limit: Number(body.limit) || 10 });
-        return sendJson(res, 200, { ok: true, size: historyIndex.size, results });
+        const results = historyStore.search(String(body.query || ''), { limit: Number(body.limit) || 10 });
+        return sendJson(res, 200, { ok: true, size: historyStore.size, results });
       } catch (e) {
         return sendJson(res, 400, { error: { message: `search failed: ${e.message}`, type: 'search_error' } });
       }
     }
     if (pathname === '/v1/history/status' && req.method === 'GET') {
-      return sendJson(res, 200, { ok: true, size: historyIndex.size });
+      return sendJson(res, 200, { ok: true, size: historyStore.size });
+    }
+    if (pathname === '/v1/history/list' && req.method === 'GET') {
+      const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 50));
+      const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
+      return sendJson(res, 200, { ok: true, ...historyStore.list({ limit, offset }) });
+    }
+    if (pathname === '/v1/history/get' && req.method === 'GET') {
+      const record = historyStore.get(String(url.searchParams.get('id') || ''));
+      if (!record) return sendJson(res, 404, { error: { message: 'no such record', type: 'not_found' } });
+      return sendJson(res, 200, { ok: true, record });
     }
 
     // The detector, on the gateway's own port (no second port). GET → health;
