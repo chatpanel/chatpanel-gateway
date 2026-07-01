@@ -43,6 +43,21 @@ test('tools/call get_record returns full text', async () => {
   assert.match(r.result.content[0].text, /the full body/);
 });
 
+test('tool descriptions advertise notes as a source type, not just chats/meetings', async () => {
+  const r = await handleRpc({ jsonrpc: '2.0', id: 8, method: 'tools/list' });
+  const search = r.result.tools.find((t) => t.name === 'search_history');
+  const get = r.result.tools.find((t) => t.name === 'get_record');
+  assert.match(search.description, /notes/i); // notes are a unified source type now
+  assert.match(get.description, /note:/); // get_record's id example includes note:<id>
+});
+
+test('get_record surfaces a note record by note:<id>', async () => {
+  mockGateway({ 'GET /v1/history/get': { ok: true, record: { id: 'note:xyz', title: 'Draft', type: 'note', date: 0, text: 'note body text' } } });
+  const r = await handleRpc({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'get_record', arguments: { id: 'note:xyz' } } });
+  assert.match(r.result.content[0].text, /note:xyz/);
+  assert.match(r.result.content[0].text, /note body text/);
+});
+
 test('tool errors surface as isError content, not a protocol error', async () => {
   mockGateway({}); // every route 404s
   const r = await handleRpc({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'search_history', arguments: { query: 'x' } } });

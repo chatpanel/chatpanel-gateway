@@ -28,7 +28,7 @@ function baseUrl() {
 const TOOLS = [
   {
     name: 'search_history',
-    description: 'Full-text search the user\'s ChatPanel history (past chats and meeting transcripts) by keyword relevance. Use this to recall what was discussed when the current context does not already contain it.',
+    description: 'Full-text search the user\'s ChatPanel history — past chats, meeting transcripts, and notes — by keyword relevance. Use this to recall what was discussed or written when the current context does not already contain it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -40,10 +40,10 @@ const TOOLS = [
   },
   {
     name: 'get_record',
-    description: 'Fetch one full history record (its complete text) by id, e.g. chat:<id> or meeting:<id> returned by search_history.',
+    description: 'Fetch one full history record (its complete text) by id, e.g. chat:<id>, meeting:<id>, or note:<id> returned by search_history.',
     inputSchema: {
       type: 'object',
-      properties: { id: { type: 'string', description: 'Record id such as chat:abc or meeting:imp_123.' } },
+      properties: { id: { type: 'string', description: 'Record id such as chat:abc, meeting:imp_123, or note:xyz.' } },
       required: ['id'],
     },
   },
