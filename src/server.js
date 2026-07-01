@@ -28,7 +28,8 @@ import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream,
 import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
 import { installTimestampedConsole } from './log.js';
-import { HistoryStore } from './history-store.js';
+import { HistoryStore, saveBackupSecret, loadBackupSecret, hasBackupSecret } from './history-store.js';
+import { ingestBackup } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
 import { MODEL_CATALOG, isKnownModel } from './models.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
@@ -38,7 +39,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.12';
+export const VERSION = '0.6.13';
 
 // WARM search tier — one record store + BM25 index per gateway process, fed by the
 // extension's ingest sync. Encrypted at rest under ~/.chatpanel, loaded on start so a
@@ -551,6 +552,34 @@ export function createGateway(cfg = loadConfig()) {
       if (!record) return sendJson(res, 404, { error: { message: 'no such record', type: 'not_found' } });
       return sendJson(res, 200, { ok: true, record });
     }
+    // Key-handoff (loopback only): store the user's backup passphrase so the gateway
+    // can decrypt their daily backups unattended. Encrypted at rest with the local
+    // key. { passphrase } → stores it and does one immediate ingest. { passphrase:'' }
+    // forgets it. GET → whether a key is held (never returns the key itself).
+    if (pathname === '/v1/history/key' && req.method === 'GET') {
+      return sendJson(res, 200, { ok: true, hasKey: hasBackupSecret() });
+    }
+    if (pathname === '/v1/history/key' && req.method === 'POST') {
+      try {
+        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+        saveBackupSecret(String(body.passphrase || ''));
+        const result = body.passphrase ? await ingestBackup(historyStore, String(body.passphrase)) : { ok: true, ingested: 0 };
+        return sendJson(res, 200, { ok: true, hasKey: !!body.passphrase, ...result });
+      } catch (e) {
+        return sendJson(res, 400, { error: { message: `key handoff failed: ${e.message}`, type: 'key_error' } });
+      }
+    }
+    // Trigger a backup-ingest now (uses the stored key). Optional { path } overrides
+    // which backup file to read. Returns how many records were seeded.
+    if (pathname === '/v1/history/ingest-backup' && req.method === 'POST') {
+      try {
+        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes) || '{}').toString('utf8') || '{}') || {};
+        const result = await ingestBackup(historyStore, loadBackupSecret(), { path: body.path });
+        return sendJson(res, result.ok ? 200 : 409, result);
+      } catch (e) {
+        return sendJson(res, 400, { error: { message: `backup ingest failed: ${e.message}`, type: 'ingest_error' } });
+      }
+    }
 
     // The detector, on the gateway's own port (no second port). GET → health;
     // POST {text} → {entities}. The bundled engine runs IN-PROCESS; a user's own
@@ -782,6 +811,14 @@ export function start(cfg = loadConfig()) {
     console.log(`  redaction: ${cfg.redaction.tier}` + (cfg.redaction.detection?.backend && cfg.redaction.detection.backend !== 'off'
       ? ` + ${cfg.redaction.detection.backend} detector` : (cfg.ner?.autostart ? ' (+ NER starting…)' : '')));
   });
+  // If the user handed off a backup key, refresh the warm store from the latest
+  // daily backup in the background — so the gateway stays current even when the
+  // extension never runs. Best-effort; never blocks startup or crashes it.
+  if (hasBackupSecret()) {
+    ingestBackup(historyStore, loadBackupSecret())
+      .then((r) => { if (r?.ok) console.log(`  warm     : seeded ${r.ingested} records from ${r.file}`); })
+      .catch(() => {});
+  }
   const shutdown = () => { ner?.stop(); entitlement.stop(); server.close(() => process.exit(0)); };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

@@ -21,6 +21,7 @@ import { SearchIndex } from './search-index.js';
 const DIR = join(os.homedir(), '.chatpanel');
 const STORE_PATH = process.env.CHATPANEL_HISTORY_STORE || join(DIR, 'history-store.enc');
 const KEY_PATH = process.env.CHATPANEL_HISTORY_KEY || join(DIR, 'history-key');
+const SECRET_PATH = process.env.CHATPANEL_HISTORY_SECRET || join(DIR, 'history-secret.enc');
 
 function loadOrCreateKey() {
   try {
@@ -50,6 +51,28 @@ function decrypt(key, env) {
   const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(env.iv, 'base64'));
   decipher.setAuthTag(Buffer.from(env.tag, 'base64'));
   return Buffer.concat([decipher.update(Buffer.from(env.ct, 'base64')), decipher.final()]);
+}
+
+// The handed-off backup passphrase, encrypted at rest with the same local key.
+// Kept separate from the records file: it's a credential, not corpus data, and the
+// gateway needs it before the store is even loaded (startup backup-ingest).
+export function saveBackupSecret(passphrase) {
+  const env = encrypt(loadOrCreateKey(), Buffer.from(String(passphrase || ''), 'utf8'));
+  mkdirSync(dirname(SECRET_PATH), { recursive: true });
+  writeFileSync(SECRET_PATH, JSON.stringify(env), { mode: 0o600 });
+}
+
+export function loadBackupSecret() {
+  try {
+    if (!existsSync(SECRET_PATH)) return '';
+    return decrypt(loadOrCreateKey(), JSON.parse(readFileSync(SECRET_PATH, 'utf8'))).toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+export function hasBackupSecret() {
+  return existsSync(SECRET_PATH);
 }
 
 // Records-plus-index with lazy, debounced encrypted persistence.
