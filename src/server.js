@@ -28,6 +28,7 @@ import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream,
 import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
 import { installTimestampedConsole } from './log.js';
+import { SearchIndex } from './search-index.js';
 import * as nerEngine from './ner-engine.js';
 import { MODEL_CATALOG, isKnownModel } from './models.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
@@ -38,6 +39,11 @@ import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
 export const VERSION = '0.6.11';
+
+// WARM search tier — one BM25 index per gateway process, fed by the extension's ingest
+// sync. In-memory for now (rebuilt from the next sync on restart); encrypted-at-rest
+// persistence is the next slice. See docs/architecture-data-tiers.
+const historyIndex = new SearchIndex();
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -502,6 +508,38 @@ export function createGateway(cfg = loadConfig()) {
         uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
       });
     }
+    // --- WARM search tier. The extension pushes its DECRYPTED records to this LOCAL
+    // process (on-device, loopback- + origin-gated above) which holds a BM25 index off
+    // the browser thread and answers full-corpus search — for the panel AND other local
+    // tools. Ranks identically to the browser hot tier (shared tokenizer/BM25).
+    //   POST /v1/history/ingest  { upserts:[{id,text,title,type,date}], removes:[id] } → { size }
+    //   POST /v1/history/search  { query, limit } → { results }
+    //   GET  /v1/history/status  → { size }
+    if (pathname === '/v1/history/ingest' && req.method === 'POST') {
+      try {
+        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+        const size = historyIndex.bulk({
+          upserts: Array.isArray(body.upserts) ? body.upserts : [],
+          removes: Array.isArray(body.removes) ? body.removes : [],
+        });
+        return sendJson(res, 200, { ok: true, size });
+      } catch (e) {
+        return sendJson(res, 400, { error: { message: `ingest failed: ${e.message}`, type: 'ingest_error' } });
+      }
+    }
+    if (pathname === '/v1/history/search' && req.method === 'POST') {
+      try {
+        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+        const results = historyIndex.search(String(body.query || ''), { limit: Number(body.limit) || 10 });
+        return sendJson(res, 200, { ok: true, size: historyIndex.size, results });
+      } catch (e) {
+        return sendJson(res, 400, { error: { message: `search failed: ${e.message}`, type: 'search_error' } });
+      }
+    }
+    if (pathname === '/v1/history/status' && req.method === 'GET') {
+      return sendJson(res, 200, { ok: true, size: historyIndex.size });
+    }
+
     // The detector, on the gateway's own port (no second port). GET → health;
     // POST {text} → {entities}. The bundled engine runs IN-PROCESS; a user's own
     // external detector (if configured) is proxied for back-compat.
