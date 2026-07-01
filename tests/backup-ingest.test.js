@@ -33,8 +33,20 @@ const DATA = {
   type: 'chatpanel-backup',
   version: 4,
   conversations: [{ id: 'c1', title: 'Roadmap', updatedAt: 200, messages: [{ role: 'user', content: 'privacy gateway warm tier plan' }, { role: 'assistant', content: 'ship RRF fusion' }] }],
-  meetings: [{ id: 'imp_9', title: 'Budget sync', startedAt: 100, segments: [{ speaker: 'Alex', text: 'finance budget review numbers' }] }],
+  // Meetings are exported wrapped as { record, notes, topics } — the real fields
+  // are under .record (this is what tripped the first cut, dropping all meetings).
+  meetings: [{ record: { id: 'imp_9', title: 'Budget sync', platform: 'meet', startedAt: 100, segments: [{ t: 1, speaker: 'Alex', text: 'finance budget review numbers' }] }, notes: 'Team reviewed Q3 finance budget.', topics: {} }],
 };
+
+test('meetings are extracted from the wrapped {record,notes} shape', () => {
+  const recs = backupToRecords(DATA);
+  const mtg = recs.find((r) => r.id === 'meeting:imp_9');
+  assert.ok(mtg, 'the wrapped meeting is extracted (not dropped)');
+  assert.equal(mtg.title, 'Budget sync');
+  assert.equal(mtg.date, 100);
+  assert.match(mtg.text, /SUMMARY:/);
+  assert.match(mtg.text, /finance budget review/);
+});
 
 test('decrypt (extension envelope) → records → ingest → search', async () => {
   const env = await makeEnvelope(DATA, 'hunter2');

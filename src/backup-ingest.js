@@ -42,17 +42,24 @@ export function backupToRecords(data) {
     const date = c.updatedAt || c.createdAt || 0;
     const body = (c.messages || [])
       .filter((m) => m && m.content)
-      .map((m) => `${m.role || 'user'}: ${m.content}`)
-      .join('\n');
-    out.push({ id: `chat:${c.id}`, type: 'chat', title, date, text: `CHAT: ${title}\n${body}`.trim() });
+      .map((m) => `${m.role === 'assistant' ? 'Assistant' : m.role === 'system' ? 'System' : 'You'}: ${m.content}`)
+      .join('\n\n');
+    out.push({ id: `chat:${c.id}`, type: 'chat', title, date, text: `CHAT: ${title}\n\n${body}`.trim() });
   }
   for (const m of data?.meetings || []) {
-    const id = m?.id;
+    // Meetings are exported wrapped: { record: {...meeting}, notes: <summary>, topics }.
+    const rec = m?.record || m;
+    const id = rec?.id;
     if (!id) continue;
-    const title = m.title || 'Meeting';
-    const date = m.startedAt || 0;
-    const segs = (m.segments || []).map((s) => `${s.speaker || ''}: ${s.text || ''}`).join('\n');
-    out.push({ id: `meeting:${id}`, type: 'meeting', title, date, text: `MEETING: ${title}\n${segs}`.trim() });
+    const title = rec.title || 'Meeting';
+    const date = rec.startedAt || rec.date || 0;
+    const notes = typeof m?.notes === 'string' ? m.notes : '';
+    const segs = (rec.segments || []).map((s) => `${s.speaker || '?'}: ${s.text || ''}`).join('\n');
+    const parts = [`MEETING: ${title}`];
+    if (rec.platform) parts.push(`Platform: ${rec.platform}`);
+    if (notes) parts.push('', 'SUMMARY:', notes);
+    if (segs) parts.push('', 'TRANSCRIPT:', segs);
+    out.push({ id: `meeting:${id}`, type: 'meeting', title, date, text: parts.join('\n').trim() });
   }
   return out;
 }
