@@ -36,7 +36,17 @@ const DATA = {
   // Meetings are exported wrapped as { record, notes, topics } — the real fields
   // are under .record (this is what tripped the first cut, dropping all meetings).
   meetings: [{ record: { id: 'imp_9', title: 'Budget sync', platform: 'meet', startedAt: 100, segments: [{ t: 1, speaker: 'Alex', text: 'finance budget review numbers' }] }, notes: 'Team reviewed Q3 finance budget.', topics: {} }],
+  notes: [{ id: 'nt_1', title: 'Project ideas', body: 'draft outline for the launch', tags: ['work'], createdAt: 50, updatedAt: 60 }],
 };
+
+test('notes (v5) are extracted as note: records', () => {
+  const recs = backupToRecords(DATA);
+  const note = recs.find((r) => r.id === 'note:nt_1');
+  assert.ok(note, 'note extracted');
+  assert.equal(note.type, 'note');
+  assert.equal(note.title, 'Project ideas');
+  assert.match(note.text, /draft outline for the launch/);
+});
 
 test('meetings are extracted from the wrapped {record,notes} shape', () => {
   const recs = backupToRecords(DATA);
@@ -54,7 +64,7 @@ test('decrypt (extension envelope) → records → ingest → search', async () 
   assert.equal(back.conversations.length, 1, 'gzip+AES-GCM round-trips across repos');
 
   const records = backupToRecords(back);
-  assert.deepEqual(records.map((r) => r.id).sort(), ['chat:c1', 'meeting:imp_9']);
+  assert.deepEqual(records.map((r) => r.id).sort(), ['chat:c1', 'meeting:imp_9', 'note:nt_1']);
   assert.ok(records.find((r) => r.id === 'meeting:imp_9').text.includes('finance budget'));
 
   const store = new HistoryStore().load();
@@ -80,7 +90,7 @@ test('ingestBackup finds the newest file in the backups dir + uses the stored ke
   const store = new HistoryStore().load();
   const r = await ingestBackup(store, loadBackupSecret());
   assert.equal(r.ok, true);
-  assert.equal(r.ingested, 2);
+  assert.equal(r.ingested, 3);
   assert.equal(store.search('finance')[0].id, 'meeting:imp_9');
 });
 

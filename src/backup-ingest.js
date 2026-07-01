@@ -61,6 +61,13 @@ export function backupToRecords(data) {
     if (segs) parts.push('', 'TRANSCRIPT:', segs);
     out.push({ id: `meeting:${id}`, type: 'meeting', title, date, text: parts.join('\n').trim() });
   }
+  // Notes (backup v5+) — plain markdown; the whole body is searchable.
+  for (const n of data?.notes || []) {
+    if (!n?.id) continue;
+    const title = n.title || 'Note';
+    const date = n.updatedAt || n.createdAt || 0;
+    out.push({ id: `note:${n.id}`, type: 'note', title, date, text: `NOTE: ${title}\n\n${String(n.body || '')}`.trim() });
+  }
   return out;
 }
 
