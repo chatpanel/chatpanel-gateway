@@ -28,7 +28,8 @@ import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream,
 import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
 import { installTimestampedConsole } from './log.js';
-import { HistoryStore, saveBackupSecret, loadBackupSecret, hasBackupSecret } from './history-store.js';
+import { saveBackupSecret, loadBackupSecret, hasBackupSecret } from './history-store.js';
+import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackup } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
 import { MODEL_CATALOG, isKnownModel } from './models.js';
@@ -39,12 +40,13 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.13';
+export const VERSION = '0.6.14';
 
-// WARM search tier — one record store + BM25 index per gateway process, fed by the
-// extension's ingest sync. Encrypted at rest under ~/.chatpanel, loaded on start so a
-// restart doesn't need a full re-ingest (no cold start). See docs/architecture-data-tiers.
-const historyStore = new HistoryStore().load();
+// WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
+// store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
+// Persistent + memory-mapped, so a restart needs no re-ingest (no cold start).
+// See docs/architecture-data-tiers.
+const historyStore = await createHistoryStore();
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
