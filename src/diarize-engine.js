@@ -99,15 +99,46 @@ export function download({ onLog } = {}) {
   return _initPromise;
 }
 
-// Embed a mono 16 kHz Float32 segment → Float32Array x-vector, or null if not ready.
-export async function embed(audio) {
-  if (!isReady() || !(audio instanceof Float32Array) || !audio.length) return null;
+const SR = 16000;
+
+function l2norm(v) {
+  let n = 0; for (const x of v) n += x * x;
+  n = Math.sqrt(n) || 1;
+  const o = new Float32Array(v.length);
+  for (let i = 0; i < v.length; i++) o[i] = v[i] / n;
+  return o;
+}
+
+async function embedOne(audio) {
   try {
     const inputs = await _processor(audio);
     const out = await _model(inputs);
     const t = out.embeddings ?? out.logits ?? out.last_hidden_state;
     return t?.data ? Float32Array.from(t.data) : null;
   } catch { return null; }
+}
+
+// Embed a mono 16 kHz Float32 segment → L2-normalized x-vector, or null if not
+// ready. For longer turns we embed several overlapping ~2 s windows and AVERAGE
+// the normalized vectors — a more stable speaker fingerprint than one embed of
+// the whole (noisy) segment. Cheap on the native runtime (runs once per turn).
+export async function embed(audio) {
+  if (!isReady() || !(audio instanceof Float32Array) || !audio.length) return null;
+  const win = 2 * SR;
+  const hop = Math.round(1.3 * SR);
+  if (audio.length <= Math.round(win * 1.4)) {
+    const v = await embedOne(audio);
+    return v ? l2norm(v) : null;
+  }
+  const vecs = [];
+  for (let s = 0; s + win <= audio.length; s += hop) {
+    const v = await embedOne(audio.subarray(s, s + win));
+    if (v) vecs.push(l2norm(v));
+  }
+  if (!vecs.length) { const v = await embedOne(audio); return v ? l2norm(v) : null; }
+  const avg = new Float32Array(vecs[0].length);
+  for (const v of vecs) for (let i = 0; i < avg.length; i++) avg[i] += v[i];
+  return l2norm(avg); // mean of unit vectors, renormalized
 }
 
 export function _reset() { _state = 'off'; _model = null; _processor = null; _err = null; _initPromise = null; _progress = null; }
