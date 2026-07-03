@@ -35,7 +35,7 @@ import * as nerEngine from './ner-engine.js';
 import * as sttEngine from './stt-engine.js';
 import * as diarizeEngine from './diarize-engine.js';
 import { MODEL_CATALOG, isKnownModel, isValidCustomModelId } from './models.js';
-import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MODEL } from './stt-models.js';
+import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MODEL, STT_DTYPES, isValidDtype } from './stt-models.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, persistConfig, configPath } from './configstore.js';
 import { resolveDestination, aggregateModelsAsync } from './router.js';
@@ -43,7 +43,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.26';
+export const VERSION = '0.6.27';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -686,6 +686,12 @@ export function createGateway(cfg = loadConfig()) {
           state: sttEngine.state(),
           progress: sttEngine.progress(),
           available,
+          // Precision (quantization) picker: current choice + selectable options +
+          // the dtype actually loaded. On WASM only fp32 loads (see runtimeDtype).
+          dtype: cfg.stt?.dtype || 'auto',
+          loadedDtype: sttEngine.health().dtype,
+          runtime: sttEngine.health().runtime,
+          dtypes: STT_DTYPES,
         });
       }
       if (req.method === 'POST') {
@@ -694,10 +700,13 @@ export function createGateway(cfg = loadConfig()) {
         const id = body && typeof body.id === 'string' ? body.id.trim() : null;
         // Curated catalog OR a strictly-validated custom whisper id (Advanced).
         if (!id || !(isKnownSttModel(id) || isValidCustomSttId(id))) return sendJson(res, 400, { error: { message: 'unknown or invalid model id', type: 'bad_model' } });
+        // Optional precision override (q8/q4/fp16/…); 'auto' clears it.
+        const dtype = typeof body.dtype === 'string' && isValidDtype(body.dtype) ? body.dtype : undefined;
         if (cfg.stt) cfg.stt.model = id; else cfg.stt = { enabled: true, model: id, allowDownload: true };
+        if (dtype) cfg.stt.dtype = dtype === 'auto' ? null : dtype;
         try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
-        sttEngine.setModel(id, { onLog: (m) => console.log(m) });
-        return sendJson(res, 202, { accepted: true, active: id, state: sttEngine.state(), progress: sttEngine.progress() });
+        sttEngine.setModel(id, { onLog: (m) => console.log(m), dtype: dtype || cfg.stt.dtype || 'auto' });
+        return sendJson(res, 202, { accepted: true, active: id, dtype: cfg.stt.dtype || 'auto', state: sttEngine.state(), progress: sttEngine.progress() });
       }
     }
     // Speaker (diarization) model manager — the "who said what" x-vector model.
@@ -725,7 +734,7 @@ export function createGateway(cfg = loadConfig()) {
       // Kick the model load on first use (single-flight; downloads once). The
       // client follows progress on the session's SSE stream.
       if (!sttEngine.isReady()) {
-        sttEngine.init({ model: cfg.stt?.model || DEFAULT_STT_MODEL, allowDownload: cfg.stt?.allowDownload !== false, onLog: (m) => console.log(m) });
+        sttEngine.init({ model: cfg.stt?.model || DEFAULT_STT_MODEL, allowDownload: cfg.stt?.allowDownload !== false, dtype: cfg.stt?.dtype || undefined, onLog: (m) => console.log(m) });
       }
       // Diarization is another OPTIONAL stage: load its model only when a session
       // asks for it (never on the dictation path).

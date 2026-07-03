@@ -85,3 +85,19 @@ export function isValidCustomSttId(id) {
   const s = String(id || '');
   return /^[A-Za-z0-9][\w.-]*\/[\w.-]+$/.test(s) && !s.includes('..');
 }
+
+// Selectable quantizations (precision). 'auto' = let the runtime decide (q8 on
+// native, fp32 on WASM). Each is a transformers.js dtype; a model must actually
+// ship that ONNX variant (the load fails open otherwise). Ordered fastest→best.
+export const STT_DTYPES = [
+  { id: 'auto', label: 'Auto (recommended)', note: 'q8 on the native gateway, fp32 on the WASM binary.' },
+  { id: 'q8', label: 'q8 — fast, balanced', note: 'Int8. Best speed/quality trade-off (native default).' },
+  { id: 'q4', label: 'q4 — smallest & fastest', note: '4-bit. Least memory; slightly lower accuracy.' },
+  { id: 'int8', label: 'int8', note: 'Alternative int8 export.' },
+  { id: 'fp16', label: 'fp16 — more accurate', note: 'Half precision. Larger, a bit slower.' },
+  { id: 'fp32', label: 'fp32 — most accurate (slow)', note: 'Full precision. Largest + slowest; the only one that loads on the WASM binary.' },
+];
+
+export function isValidDtype(d) {
+  return STT_DTYPES.some((x) => x.id === d);
+}

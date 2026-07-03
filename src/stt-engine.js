@@ -85,8 +85,8 @@ export function health() {
 
 // (Re)load a model into _pipe. Same contract as ner-engine.loadModel: fail-open,
 // and a failed SWITCH keeps the previous working pipeline.
-/** @param {string} modelId @param {{ log?: (m: string) => void, allowDownload?: boolean }} [opts] */
-async function loadModel(modelId, { log = () => {}, allowDownload = true } = {}) {
+/** @param {string} modelId @param {{ log?: (m: string) => void, allowDownload?: boolean, dtype?: string }} [opts] */
+async function loadModel(modelId, { log = () => {}, allowDownload = true, dtype: dtypeOverride = null } = {}) {
   const prevPipe = _pipe;
   const prevModel = _model;
   let lib;
@@ -98,7 +98,13 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true } = {})
     return false;
   }
 
-  const haveLocal = modelOnDisk(modelId);
+  // Resolve the precision up front so the on-disk check targets the RIGHT files —
+  // else switching precision (e.g. q8→fp16) would see the q8 files as "present" and
+  // try to load fp16 offline, which fails.
+  const chosen = dtypeOverride && dtypeOverride !== 'auto' ? dtypeOverride : null;
+  const dtype = chosen || sttModelDtype(modelId) || runtimeDtype();
+
+  const haveLocal = modelOnDisk(modelId, dtype);
   lib.env.allowRemoteModels = haveLocal ? false : !!allowDownload;
   if (!haveLocal && !allowDownload) {
     _state = 'error'; _err = 'model not on disk and downloads disabled';
@@ -117,8 +123,6 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true } = {})
   if (!haveLocal) { _progress = { model: modelId, file: null, pct: 0 }; log(`[stt] downloading model ${modelId} (one-time${isCustom ? ', from Hugging Face' : ''})…`); }
 
   try {
-    // Per-model override wins (catalog `dtype`), else the runtime-appropriate default.
-    const dtype = sttModelDtype(modelId) || runtimeDtype();
     const progress_callback = (p) => {
       if (!p) return;
       const pct = typeof p.progress === 'number' ? Math.round(p.progress) : (_progress?.pct ?? 0);
@@ -163,15 +167,17 @@ export function init(cfg = {}) {
   const log = typeof cfg.onLog === 'function' ? cfg.onLog : () => {};
   _model = cfg.model || DEFAULT_STT_MODEL;
   _state = 'loading';
-  _initPromise = loadModel(_model, { log, allowDownload: cfg.allowDownload !== false });
+  _initPromise = loadModel(_model, { log, allowDownload: cfg.allowDownload !== false, dtype: cfg.dtype });
   return _initPromise;
 }
 
 export async function setModel(modelId, opts = {}) {
   const log = typeof opts.onLog === 'function' ? opts.onLog : () => {};
   if (!modelId) return false;
-  if (modelId === _model && isReady()) return true;
-  return loadModel(modelId, { log, allowDownload: opts.allowDownload !== false });
+  // Re-load if the model OR the requested precision changed.
+  const wantDtype = opts.dtype && opts.dtype !== 'auto' ? opts.dtype : (sttModelDtype(modelId) || runtimeDtype());
+  if (modelId === _model && isReady() && _dtype === wantDtype) return true;
+  return loadModel(modelId, { log, allowDownload: opts.allowDownload !== false, dtype: opts.dtype });
 }
 
 // ── Streaming sessions ──────────────────────────────────────────────────────────
