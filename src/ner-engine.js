@@ -17,6 +17,7 @@
 import os from 'node:os';
 import { join } from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
+import { isKnownModel } from './models.js';
 
 const DEFAULT_MODEL = 'Xenova/bert-base-NER';
 
@@ -199,8 +200,15 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true } = {})
     return false;
   }
 
+  // Curated catalog models come from the private dl.chatpanel.net mirror
+  // (ensureLib set that as remoteHost). A user's BYO id isn't mirrored, so fetch
+  // it from Hugging Face directly — only for this load, then restore.
+  const prevHost = lib.env.remoteHost;
+  const isCustom = !isKnownModel(modelId);
+  if (!haveLocal && isCustom) { try { lib.env.remoteHost = 'https://huggingface.co/'; } catch { /* optional */ } }
+
   _state = haveLocal ? 'loading' : 'downloading';
-  if (!haveLocal) { _progress = { model: modelId, file: null, pct: 0 }; log(`[ner] downloading model ${modelId} (one-time)…`); }
+  if (!haveLocal) { _progress = { model: modelId, file: null, pct: 0 }; log(`[ner] downloading model ${modelId} (one-time${isCustom ? ', from Hugging Face' : ''})…`); }
 
   try {
     const pipe = await lib.pipeline('token-classification', modelId, {
@@ -227,6 +235,8 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true } = {})
     else { _state = 'error'; }
     log(`[ner] model load failed (${e.message})${prevPipe ? ' — keeping previous model' : ' — deterministic-only'}`);
     return false;
+  } finally {
+    try { lib.env.remoteHost = prevHost; } catch { /* optional */ } // restore the mirror
   }
 }
 

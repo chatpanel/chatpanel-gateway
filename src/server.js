@@ -33,7 +33,7 @@ import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackup } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
 import * as sttEngine from './stt-engine.js';
-import { MODEL_CATALOG, isKnownModel } from './models.js';
+import { MODEL_CATALOG, isKnownModel, isValidCustomModelId } from './models.js';
 import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MODEL } from './stt-models.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, persistConfig, configPath } from './configstore.js';
@@ -42,7 +42,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.19';
+export const VERSION = '0.6.20';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -632,9 +632,14 @@ export function createGateway(cfg = loadConfig()) {
     // model (downloading it first if needed) and persists the choice.
     if (pathname === '/ner/models') {
       if (req.method === 'GET') {
-        const available = MODEL_CATALOG.map((m) => ({ ...m, installed: nerEngine.modelOnDisk(m.id) }));
+        const active = nerEngine.health().model || cfg.ner?.model || null;
+        const available = /** @type {any[]} */ (MODEL_CATALOG.map((m) => ({ ...m, installed: nerEngine.modelOnDisk(m.id) })));
+        // Surface an active BYO (non-catalog) model so the UI shows it too.
+        if (active && !available.some((m) => m.id === active)) {
+          available.push({ id: active, label: active, lang: '—', custom: true, installed: nerEngine.modelOnDisk(active), note: 'Custom model (from Hugging Face).' });
+        }
         return sendJson(res, 200, {
-          active: nerEngine.health().model || cfg.ner?.model || null,
+          active,
           state: nerEngine.state(),
           progress: nerEngine.progress(),
           available,
@@ -643,8 +648,9 @@ export function createGateway(cfg = loadConfig()) {
       if (req.method === 'POST') {
         let body = null;
         try { body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')); } catch { body = null; }
-        const id = body && typeof body.id === 'string' ? body.id : null;
-        if (!id || !isKnownModel(id)) return sendJson(res, 400, { error: { message: 'unknown model id', type: 'bad_model' } });
+        const id = body && typeof body.id === 'string' ? body.id.trim() : null;
+        // Curated catalog OR a strictly-validated BYO id (org/name, from HF).
+        if (!id || !(isKnownModel(id) || isValidCustomModelId(id))) return sendJson(res, 400, { error: { message: 'unknown or invalid model id', type: 'bad_model' } });
         // Persist first so a restart keeps the choice, then (re)load. Don't block the
         // response on a possibly-long download — the client polls GET for progress.
         if (cfg.ner) cfg.ner.model = id; else cfg.ner = { autostart: true, model: id, allowDownload: true, enableFullTier: true };

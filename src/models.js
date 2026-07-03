@@ -36,3 +36,12 @@ export const MODEL_CATALOG = [
 export function isKnownModel(id) {
   return MODEL_CATALOG.some((m) => m.id === id);
 }
+
+// Accept a user-supplied ("bring your own") NER model id. STRICT `org/name` shape,
+// no path traversal. We can't verify it's token-classification from the id alone —
+// the engine fails open if the download/labels don't fit. Custom ids fetch from
+// Hugging Face directly (the engine points remoteHost there for the custom load).
+export function isValidCustomModelId(id) {
+  const s = String(id || '');
+  return /^[A-Za-z0-9][\w.-]*\/[\w.-]+$/.test(s) && !s.includes('..');
+}
