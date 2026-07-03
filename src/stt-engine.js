@@ -44,6 +44,7 @@ let _pipe = null;          // the loaded automatic-speech-recognition pipeline
 let _err = null;           // last error message (for /health)
 let _initPromise = null;   // single-flight init
 let _progress = null;      // { model, file, pct } while downloading, else null
+let _dtype = null;         // the quantization actually loaded (fp32 on WASM, q8 native)
 
 // transformers.js dtype → the ONNX filename suffix it loads. Presence must check
 // the EXACT file the current runtime will fetch — otherwise a q8 install (native)
@@ -70,7 +71,7 @@ export function isReady() { return _state === 'ready' && !!_pipe; }
 export function progress() { return _progress; }
 
 export function health() {
-  return { configured: _state !== 'off', ok: isReady(), state: _state, model: _model, error: _err };
+  return { configured: _state !== 'off', ok: isReady(), state: _state, model: _model, dtype: _dtype, error: _err };
 }
 
 // (Re)load a model into _pipe. Same contract as ner-engine.loadModel: fail-open,
@@ -121,9 +122,9 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true } = {})
         }
       },
     });
-    _pipe = pipe; _model = modelId; _state = 'ready'; _err = null; _progress = null;
+    _pipe = pipe; _model = modelId; _state = 'ready'; _err = null; _progress = null; _dtype = dtype;
     if (prevPipe && prevPipe !== pipe) { try { await prevPipe.dispose?.(); } catch { /* ignore */ } }
-    log(`[stt] ready — model ${modelId} (in-process, offline) — local dictation active`);
+    log(`[stt] ready — model ${modelId} @ ${dtype} (in-process, offline) — local dictation active`);
     return true;
   } catch (e) {
     _err = e.message; _progress = null;
