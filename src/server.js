@@ -33,6 +33,7 @@ import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackup } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
 import * as sttEngine from './stt-engine.js';
+import * as diarizeEngine from './diarize-engine.js';
 import { MODEL_CATALOG, isKnownModel, isValidCustomModelId } from './models.js';
 import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MODEL } from './stt-models.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
@@ -42,7 +43,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.21';
+export const VERSION = '0.6.22';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -706,10 +707,18 @@ export function createGateway(cfg = loadConfig()) {
       if (!sttEngine.isReady()) {
         sttEngine.init({ model: cfg.stt?.model || DEFAULT_STT_MODEL, allowDownload: cfg.stt?.allowDownload !== false, onLog: (m) => console.log(m) });
       }
+      // Diarization is another OPTIONAL stage: load its model only when a session
+      // asks for it (never on the dictation path).
+      const wantDiarize = body?.diarize === true && cfg.stt?.diarize !== false;
+      if (wantDiarize && !diarizeEngine.isReady()) {
+        diarizeEngine.init({ allowDownload: cfg.stt?.allowDownload !== false, onLog: (m) => console.log(m) });
+      }
       try {
         // `redact: true` chains the OPTIONAL redaction hop onto finals (STT → NER,
         // same composable model as everything else: any stage, with or without).
-        const { id } = sttEngine.createSession({ lang: body?.lang, redact: body?.redact === true });
+        // `diarize: true` (+ optional `speakerLabel` to pin the mic channel to a
+        // name) attaches a speaker to each final.
+        const { id } = sttEngine.createSession({ lang: body?.lang, redact: body?.redact === true, diarize: wantDiarize, speakerLabel: body?.speakerLabel });
         return sendJson(res, 201, { id, state: sttEngine.state() });
       } catch (e) {
         return sendJson(res, e.code === 'too_many_sessions' ? 429 : 500, { error: { message: e.message, type: e.code || 'stt_error' } });

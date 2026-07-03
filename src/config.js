@@ -104,6 +104,9 @@ const DEFAULTS = {
     enabled: true,
     model: 'onnx-community/whisper-base',
     allowDownload: true,
+    // Speaker diarization ("who said what") is an OPT-IN per-session stage (its
+    // model loads only when a session asks). Set false to disable it gateway-wide.
+    diarize: true,
   },
 
   // Log one line per request (method, tokens redacted) without any raw values.

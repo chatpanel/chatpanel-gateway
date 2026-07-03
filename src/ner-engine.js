@@ -162,7 +162,7 @@ export async function ensureLib() {
     try { Object.defineProperty(process, 'release', { value: { ...process.release, name: 'bun' }, configurable: true }); } catch { /* ignore */ }
   }
 
-  const { env, pipeline, Tensor } = await import('@huggingface/transformers');
+  const { env, pipeline, Tensor, AutoModel, AutoProcessor } = await import('@huggingface/transformers');
   env.cacheDir = root;          // where remote downloads are cached
   env.localModelPath = root;    // where local loads resolve — same dir, we control it
   try { env.remoteHost = MODEL_HOST; } catch { /* optional */ }
@@ -172,7 +172,7 @@ export async function ensureLib() {
     // failure when ORT-web runs outside a browser.
     try { env.backends.onnx.wasm.proxy = false; env.backends.onnx.wasm.wasmPaths = wasmPaths; } catch { /* optional */ }
   }
-  _lib = { env, pipeline, Tensor };
+  _lib = { env, pipeline, Tensor, AutoModel, AutoProcessor };
   return _lib;
 }
 

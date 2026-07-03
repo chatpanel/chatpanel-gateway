@@ -21,6 +21,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { ensureLib, modelRoot } from './ner-engine.js';
 import { DEFAULT_STT_MODEL, isEnglishOnly, sttModelDtype, isKnownSttModel } from './stt-models.js';
+import * as diarize from './diarize-engine.js';
 
 export const SAMPLE_RATE = 16000; // fixed wire contract: 16 kHz mono Float32 PCM
 
@@ -171,8 +172,8 @@ let _decodeChain = Promise.resolve(); // whisper is effectively single-threaded 
 
 export function sessionCount() { return _sessions.size; }
 
-/** @param {{ lang?: string, redact?: boolean }} [opts] */
-export function createSession({ lang, redact = false } = {}) {
+/** @param {{ lang?: string, redact?: boolean, diarize?: boolean, speakerLabel?: string }} [opts] */
+export function createSession({ lang, redact = false, diarize: diarizeOpt = false, speakerLabel = null } = {}) {
   if (_sessions.size >= MAX_SESSIONS) {
     const e = /** @type {Error & { code?: string }} */ (new Error('too many concurrent dictation sessions'));
     e.code = 'too_many_sessions'; throw e;
@@ -184,6 +185,12 @@ export function createSession({ lang, redact = false } = {}) {
     // Opaque to this engine: the server applies the redaction hop to finals when
     // set. Pipeline stages stay independent — STT never imports NER.
     redact: !!redact,
+    // Diarization is opt-in. A per-session Diarizer clusters final segments into
+    // speakers; `speakerLabel` pins every final to one label (the mic channel =
+    // "You" in a meeting), so clustering only ever splits the other channels.
+    diarize: !!diarizeOpt,
+    speakerLabel: typeof speakerLabel === 'string' && speakerLabel ? speakerLabel.slice(0, 40) : null,
+    diarizer: diarizeOpt ? new diarize.Diarizer() : null,
     chunks: [],            // Float32Array pieces of the OPEN (unfinalized) segment
     samples: 0,
     listeners: new Set(),  // (event) => void — the SSE writers
@@ -263,6 +270,17 @@ function rms(audio, from = 0, to = audio.length) {
   return Math.sqrt(sum / n);
 }
 
+// Trim leading/trailing near-silence so a speaker embedding is computed on VOICE,
+// not room tone — otherwise the silence dominates and distinct speakers' vectors
+// converge (they'd all cluster as one). Window-scan at 20 ms granularity.
+function voicedRegion(audio) {
+  const w = Math.round(0.02 * SAMPLE_RATE);
+  let start = 0, end = audio.length;
+  for (let i = 0; i + w <= audio.length; i += w) { if (rms(audio, i, i + w) >= SILENCE_RMS) { start = i; break; } }
+  for (let i = audio.length - w; i >= 0; i -= w) { if (rms(audio, i, i + w) >= SILENCE_RMS) { end = i + w; break; } }
+  return end > start ? audio.subarray(start, end) : audio;
+}
+
 // Whisper's native language-ID, which transformers.js doesn't implement (its
 // pipeline just defaults to English): one decoder step from <|startoftranscript|>,
 // argmax over the 99 language tokens. Run ONCE per session on the first voiced
@@ -328,7 +346,16 @@ async function decodeSession(s, { flush = false } = {}) {
   if (flush || trailingQuiet || tooLong || overflow) {
     // Commit: the open segment becomes a final; the buffer restarts empty.
     s.chunks = []; s.samples = 0; s.lastInterim = '';
-    emit(s, { type: 'final', text });
+    // Diarize this committed segment (opt-in): embed its audio, cluster → speaker.
+    // A pinned label (mic = "You") skips clustering. Best-effort; never blocks text.
+    let speaker = null;
+    if (s.diarizer) {
+      try {
+        const vec = s.speakerLabel ? null : await diarize.embed(voicedRegion(audio));
+        speaker = s.diarizer.assign(vec, { pinnedLabel: s.speakerLabel });
+      } catch { /* diarization is additive — a failure never drops the transcript */ }
+    }
+    emit(s, speaker ? { type: 'final', text, speaker } : { type: 'final', text });
   } else if (text !== s.lastInterim) {
     s.lastInterim = text;
     emit(s, { type: 'interim', text });
