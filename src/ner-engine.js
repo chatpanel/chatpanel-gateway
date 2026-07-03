@@ -179,6 +179,7 @@ export async function ensureLib() {
 // (Re)load a specific model into _pipe. Downloads it first if missing (and allowed).
 // Reusable by init() and setModel(). Fail-open: on error, state='error', _pipe stays
 // whatever it was (so a failed SWITCH doesn't kill a working detector).
+/** @param {string} modelId @param {{ log?: (m: string) => void, allowDownload?: boolean }} [opts] */
 async function loadModel(modelId, { log = () => {}, allowDownload = true } = {}) {
   const prevPipe = _pipe;
   const prevModel = _model;
@@ -211,18 +212,26 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true } = {})
   if (!haveLocal) { _progress = { model: modelId, file: null, pct: 0 }; log(`[ner] downloading model ${modelId} (one-time${isCustom ? ', from Hugging Face' : ''})…`); }
 
   try {
-    const pipe = await lib.pipeline('token-classification', modelId, {
-      dtype: 'q8',
-      progress_callback: (p) => {
-        if (!p) return;
-        const pct = typeof p.progress === 'number' ? Math.round(p.progress) : (_progress?.pct ?? 0);
-        if (p.status === 'progress' || p.status === 'download' || p.status === 'initiate') {
-          _progress = { model: modelId, file: p.file || _progress?.file || null, pct };
-        } else if (p.status === 'done' && p.file) {
-          log(`[ner] fetched ${p.file}`);
-        }
-      },
-    });
+    const progress_callback = (p) => {
+      if (!p) return;
+      const pct = typeof p.progress === 'number' ? Math.round(p.progress) : (_progress?.pct ?? 0);
+      if (p.status === 'progress' || p.status === 'download' || p.status === 'initiate') {
+        _progress = { model: modelId, file: p.file || _progress?.file || null, pct };
+      } else if (p.status === 'done' && p.file) {
+        log(`[ner] fetched ${p.file}`);
+      }
+    };
+    let pipe;
+    try {
+      pipe = await lib.pipeline('token-classification', modelId, { dtype: 'q8', progress_callback });
+    } catch (e) {
+      // Mirror gap → fall back to Hugging Face (same as stt-engine).
+      if (haveLocal || isCustom || !allowDownload) throw e;
+      log(`[ner] mirror fetch failed (${String(e.message).slice(0, 80)}) — retrying from Hugging Face…`);
+      lib.env.remoteHost = 'https://huggingface.co/';
+      lib.env.allowRemoteModels = true;
+      pipe = await lib.pipeline('token-classification', modelId, { dtype: 'q8', progress_callback });
+    }
     // Swap in the new pipeline, dispose the old one (free its WASM/native session).
     _pipe = pipe; _model = modelId; _state = 'ready'; _err = null; _progress = null;
     if (prevPipe && prevPipe !== pipe) { try { await prevPipe.dispose?.(); } catch { /* ignore */ } }

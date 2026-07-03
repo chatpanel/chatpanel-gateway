@@ -119,18 +119,28 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true } = {})
   try {
     // Per-model override wins (catalog `dtype`), else the runtime-appropriate default.
     const dtype = sttModelDtype(modelId) || runtimeDtype();
-    const pipe = await lib.pipeline('automatic-speech-recognition', modelId, {
-      dtype,
-      progress_callback: (p) => {
-        if (!p) return;
-        const pct = typeof p.progress === 'number' ? Math.round(p.progress) : (_progress?.pct ?? 0);
-        if (p.status === 'progress' || p.status === 'download' || p.status === 'initiate') {
-          _progress = { model: modelId, file: p.file || _progress?.file || null, pct };
-        } else if (p.status === 'done' && p.file) {
-          log(`[stt] fetched ${p.file}`);
-        }
-      },
-    });
+    const progress_callback = (p) => {
+      if (!p) return;
+      const pct = typeof p.progress === 'number' ? Math.round(p.progress) : (_progress?.pct ?? 0);
+      if (p.status === 'progress' || p.status === 'download' || p.status === 'initiate') {
+        _progress = { model: modelId, file: p.file || _progress?.file || null, pct };
+      } else if (p.status === 'done' && p.file) {
+        log(`[stt] fetched ${p.file}`);
+      }
+    };
+    let pipe;
+    try {
+      pipe = await lib.pipeline('automatic-speech-recognition', modelId, { dtype, progress_callback });
+    } catch (e) {
+      // The dl.chatpanel.net mirror only proxies an allowlist; a catalog model
+      // missing from it (or any mirror hiccup) 403s. Fall back to Hugging Face so
+      // a download is never blocked by a mirror gap. (Custom ids already use HF.)
+      if (haveLocal || isCustom || !allowDownload) throw e;
+      log(`[stt] mirror fetch failed (${String(e.message).slice(0, 80)}) — retrying from Hugging Face…`);
+      lib.env.remoteHost = 'https://huggingface.co/';
+      lib.env.allowRemoteModels = true;
+      pipe = await lib.pipeline('automatic-speech-recognition', modelId, { dtype, progress_callback });
+    }
     _pipe = pipe; _model = modelId; _state = 'ready'; _err = null; _progress = null; _dtype = dtype;
     if (prevPipe && prevPipe !== pipe) { try { await prevPipe.dispose?.(); } catch { /* ignore */ } }
     log(`[stt] ready — model ${modelId} @ ${dtype} (in-process, offline) — local dictation active`);
