@@ -54,6 +54,15 @@ chatpanel-gateway
 #     backend  : bridge (agent: codex, via http://127.0.0.1:4319)
 ```
 
+> **Binary vs. npm — same features, very different local-AI speed.** Both run
+> identical redaction/routing. But the standalone binary runs the local models
+> (speech-to-text, diarization, NER) on the **WASM** runtime — **fp32-only,
+> single-threaded, slow**. The **npm** install uses the **native** runtime with
+> **quantized (q8)** models — in our tests **~10× faster** speech-to-text
+> (real-time even on larger, more accurate models). If you'll use voice/meeting
+> features, install via **npm**. Don't run both — they can shadow each other on
+> `PATH`; check `GET /health` → `stt.runtime` (`native` vs `wasm`).
+
 Then point your front-end agent at it. **opencode** (`opencode.json`):
 
 ```jsonc
