@@ -22,7 +22,7 @@ export function persistConfig(cfg, path = configPath()) {
     // restart drops them and every model falls back to the default OpenAI upstream.
     destinations: cfg.destinations,
     bridge: cfg.bridge, upstreams: cfg.upstreams, redaction: cfg.redaction,
-    ner: cfg.ner, allowedOrigins: cfg.allowedOrigins, maxBodyBytes: cfg.maxBodyBytes,
+    ner: cfg.ner, stt: cfg.stt, allowedOrigins: cfg.allowedOrigins, maxBodyBytes: cfg.maxBodyBytes,
     pro: cfg.pro, logRequests: cfg.logRequests, logDetail: cfg.logDetail, tools: cfg.tools,
   };
   writeFileSync(path, JSON.stringify(out, null, 2));
@@ -45,6 +45,7 @@ export function publicConfig(cfg, { proUnlocked = false } = {}) {
       dictionary: Array.isArray(cfg.redaction?.dictionary) ? cfg.redaction.dictionary : [],
     },
     ner: cfg.ner,
+    stt: cfg.stt,
     allowedOrigins: Array.isArray(cfg.allowedOrigins) ? cfg.allowedOrigins : [],
     // free = lifetime trial usage ({ used, cap, remaining }) — read-only; the cap
     // is fixed and the count is server-authoritative (never settable from the UI).
@@ -108,6 +109,13 @@ export function applyConfigPatch(cfg, patch = {}) {
     // NOTE: the free trial is a FIXED lifetime cap (freegate.FREE_TOTAL_CAP) and
     // its `used` count is server-authoritative — neither is editable here, so a
     // client can't raise the cap or reset its own trial.
+  }
+  // Local dictation toggle. The MODEL is switched via POST /stt/models (like the
+  // NER manager), not patched here.
+  if (patch.stt && typeof patch.stt === 'object') {
+    cfg.stt = cfg.stt || { enabled: true, model: 'onnx-community/whisper-base', allowDownload: true };
+    if ('enabled' in patch.stt) cfg.stt.enabled = !!patch.stt.enabled;
+    if ('allowDownload' in patch.stt) cfg.stt.allowDownload = !!patch.stt.allowDownload;
   }
   if (typeof patch.logRequests === 'boolean') cfg.logRequests = patch.logRequests;
   if (['off', 'types', 'values'].includes(patch.logDetail)) cfg.logDetail = patch.logDetail;

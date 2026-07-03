@@ -143,7 +143,9 @@ export async function fetchAdapter(_url, opts = {}) {
 export function progress() { return _progress; }
 
 // Import transformers ONCE and configure its env (model dir + WASM in a binary).
-async function ensureLib() {
+// Exported so sibling engines (stt-engine.js) share the same configured lib —
+// one env, one cache dir, one WASM setup; never a second copy of this logic.
+export async function ensureLib() {
   if (_lib) return _lib;
   const root = modelRoot();
   try { mkdirSync(root, { recursive: true }); } catch { /* best effort */ }
@@ -159,7 +161,7 @@ async function ensureLib() {
     try { Object.defineProperty(process, 'release', { value: { ...process.release, name: 'bun' }, configurable: true }); } catch { /* ignore */ }
   }
 
-  const { env, pipeline } = await import('@huggingface/transformers');
+  const { env, pipeline, Tensor } = await import('@huggingface/transformers');
   env.cacheDir = root;          // where remote downloads are cached
   env.localModelPath = root;    // where local loads resolve — same dir, we control it
   try { env.remoteHost = MODEL_HOST; } catch { /* optional */ }
@@ -169,7 +171,7 @@ async function ensureLib() {
     // failure when ORT-web runs outside a browser.
     try { env.backends.onnx.wasm.proxy = false; env.backends.onnx.wasm.wasmPaths = wasmPaths; } catch { /* optional */ }
   }
-  _lib = { env, pipeline };
+  _lib = { env, pipeline, Tensor };
   return _lib;
 }
 

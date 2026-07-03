@@ -96,6 +96,16 @@ const DEFAULTS = {
     enableFullTier: true,
   },
 
+  // Local speech-to-text (dictation) — whisper via the same in-process ONNX engine
+  // and model dir as NER (stt-engine.js). No autostart on purpose: the model
+  // downloads on FIRST dictation, never on gateway boot (first-run load time).
+  // Multilingual default so the spoken language is auto-detected per segment.
+  stt: {
+    enabled: true,
+    model: 'onnx-community/whisper-base',
+    allowDownload: true,
+  },
+
   // Log one line per request (method, tokens redacted) without any raw values.
   logRequests: true,
 

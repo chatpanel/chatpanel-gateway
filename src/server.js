@@ -20,7 +20,7 @@
 import { createServer } from 'node:http';
 import { loadConfig } from './config.js';
 import { startEntitlementRefresh, maybeRevalidate } from './entitlement-refresh.js';
-import { redactSegments } from './redact.js';
+import { redactSegments, segment } from './redact.js';
 import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer } from './stream.js';
 import { restoreText, gatedDictionary, narrowSpecs, makeToolHarness, placeholderToolNote } from '@chatpanel/pii';
 import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
@@ -32,7 +32,9 @@ import { saveBackupSecret, loadBackupSecret, hasBackupSecret } from './history-s
 import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackup } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
+import * as sttEngine from './stt-engine.js';
 import { MODEL_CATALOG, isKnownModel } from './models.js';
+import { STT_MODEL_CATALOG, isKnownSttModel, DEFAULT_STT_MODEL } from './stt-models.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, persistConfig, configPath } from './configstore.js';
 import { resolveDestination, aggregateModelsAsync } from './router.js';
@@ -40,7 +42,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.17';
+export const VERSION = '0.6.18';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -490,7 +492,14 @@ export function createGateway(cfg = loadConfig()) {
     if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
     if (req.method === 'GET' && pathname === '/health') {
-      return sendJson(res, 200, { ok: true, version: VERSION, backend: cfg.backend, tier: cfg.redaction.tier });
+      // `stt` is ADDITIVE (Tesla rule): old clients ignore it, new clients use it
+      // to auto-detect local dictation. `enabled` reflects config; the model only
+      // downloads on first use, so state may be 'off' while still available.
+      const stt = sttEngine.health();
+      return sendJson(res, 200, {
+        ok: true, version: VERSION, backend: cfg.backend, tier: cfg.redaction.tier,
+        stt: { enabled: cfg.stt?.enabled !== false, state: stt.state, ready: stt.ok, model: stt.model || cfg.stt?.model || DEFAULT_STT_MODEL },
+      });
     }
 
     // --- Config API (the extension's "Gateway" tab is a client of these) ---
@@ -644,6 +653,112 @@ export function createGateway(cfg = loadConfig()) {
           if (ok && cfg.ner?.enableFullTier && cfg.redaction.tier !== 'full') cfg.redaction.tier = 'full';
         });
         return sendJson(res, 202, { accepted: true, active: id, state: nerEngine.state(), progress: nerEngine.progress() });
+      }
+    }
+    // --- Local speech-to-text (dictation). Whisper runs IN-PROCESS (stt-engine.js,
+    // same ONNX engine + model dir as NER); audio arrives as 16 kHz mono Float32 PCM
+    // chunks over loopback and ONLY TEXT ever leaves this process. Wire contract
+    // (additive; see docs in the hub repo):
+    //   POST   /stt/sessions               {lang?} → 201 { id }   (ensures the model)
+    //   POST   /stt/sessions/:id/audio     binary Float32 PCM chunk → { ok }
+    //   GET    /stt/sessions/:id/events    SSE: progress | interim | final | error | end
+    //   DELETE /stt/sessions/:id           flush tail → { ok }
+    //   GET/POST /stt/models               catalog + progress / switch (mirrors /ner/models)
+    if (pathname === '/stt/models') {
+      if (req.method === 'GET') {
+        const available = STT_MODEL_CATALOG.map((m) => ({ ...m, installed: sttEngine.modelOnDisk(m.id) }));
+        return sendJson(res, 200, {
+          active: sttEngine.health().model || cfg.stt?.model || DEFAULT_STT_MODEL,
+          state: sttEngine.state(),
+          progress: sttEngine.progress(),
+          available,
+        });
+      }
+      if (req.method === 'POST') {
+        let body = null;
+        try { body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')); } catch { body = null; }
+        const id = body && typeof body.id === 'string' ? body.id : null;
+        if (!id || !isKnownSttModel(id)) return sendJson(res, 400, { error: { message: 'unknown model id', type: 'bad_model' } });
+        if (cfg.stt) cfg.stt.model = id; else cfg.stt = { enabled: true, model: id, allowDownload: true };
+        try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
+        sttEngine.setModel(id, { onLog: (m) => console.log(m) });
+        return sendJson(res, 202, { accepted: true, active: id, state: sttEngine.state(), progress: sttEngine.progress() });
+      }
+    }
+    if (pathname === '/stt/sessions' && req.method === 'POST') {
+      if (cfg.stt?.enabled === false) return sendJson(res, 403, { error: { message: 'STT disabled in gateway config', type: 'stt_disabled' } });
+      let body = null;
+      try { body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8') || '{}'); } catch { body = null; }
+      // Kick the model load on first use (single-flight; downloads once). The
+      // client follows progress on the session's SSE stream.
+      if (!sttEngine.isReady()) {
+        sttEngine.init({ model: cfg.stt?.model || DEFAULT_STT_MODEL, allowDownload: cfg.stt?.allowDownload !== false, onLog: (m) => console.log(m) });
+      }
+      try {
+        // `redact: true` chains the OPTIONAL redaction hop onto finals (STT → NER,
+        // same composable model as everything else: any stage, with or without).
+        const { id } = sttEngine.createSession({ lang: body?.lang, redact: body?.redact === true });
+        return sendJson(res, 201, { id, state: sttEngine.state() });
+      } catch (e) {
+        return sendJson(res, e.code === 'too_many_sessions' ? 429 : 500, { error: { message: e.message, type: e.code || 'stt_error' } });
+      }
+    }
+    {
+      const m = pathname.match(/^\/stt\/sessions\/([0-9a-f-]{36})(\/audio|\/events)?$/);
+      if (m) {
+        const sid = m[1];
+        if (m[2] === '/audio' && req.method === 'POST') {
+          try {
+            const raw = await readBody(req, cfg.maxBodyBytes);
+            sttEngine.pushAudio(sid, sttEngine.toFloat32(raw));
+            return sendJson(res, 200, { ok: true, state: sttEngine.state() });
+          } catch (e) {
+            return sendJson(res, e.code === 'no_session' ? 404 : 400, { error: { message: e.message, type: e.code || 'stt_error' } });
+          }
+        }
+        if (m[2] === '/events' && req.method === 'GET') {
+          const sess = sttEngine.getSession(sid);
+          if (!sess) return sendJson(res, 404, { error: { message: 'no such session', type: 'no_session' } });
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+          const send = (ev) => res.write(`data: ${JSON.stringify(ev)}\n\n`);
+          // Optional STT → NER hop: redact FINALS through the same shared guard as
+          // chat traffic (one implementation, composed — never a second redactor).
+          // Interims stay raw (transient, loopback-only). NOTE: the vault is
+          // discarded, so these placeholders are permanent — that's the point.
+          const sttIsPro = sess.redact ? await resolvePro(cfg.pro?.entitlementToken) : true;
+          const maybeRedact = async (ev) => {
+            if (ev.type !== 'final' || !sess.redact) return ev;
+            try {
+              let t = ev.text;
+              await redactSegments([segment(() => t, (v) => { t = v; })], cfg.redaction, { isPro: sttIsPro });
+              return { ...ev, text: t };
+            } catch { return ev; } // fail-open: raw text is still local-only
+          };
+          // While the model is loading/downloading, stream progress so the UI can
+          // show "downloading 43%" instead of dead air on first-ever dictation.
+          send({ type: 'state', state: sttEngine.state() });
+          const progressTimer = setInterval(() => {
+            const st = sttEngine.state();
+            if (st === 'downloading' || st === 'loading') send({ type: 'progress', state: st, ...(sttEngine.progress() || {}) });
+            else if (st === 'error') { send({ type: 'error', code: 'model_failed', message: sttEngine.health().error || 'model failed to load', fatal: true }); clearInterval(progressTimer); }
+            else { send({ type: 'state', state: st }); clearInterval(progressTimer); }
+          }, 500);
+          progressTimer.unref?.();
+          // Redaction is async — chain events so finals can't overtake interims.
+          let evChain = Promise.resolve();
+          const unsub = sttEngine.subscribe(sid, (ev) => {
+            evChain = evChain.then(async () => {
+              send(await maybeRedact(ev));
+              if (ev.type === 'end') { clearInterval(progressTimer); res.end(); }
+            }).catch(() => {});
+          });
+          req.on('close', () => { clearInterval(progressTimer); unsub?.(); });
+          return;
+        }
+        if (!m[2] && req.method === 'DELETE') {
+          await sttEngine.endSession(sid);
+          return sendJson(res, 200, { ok: true });
+        }
       }
     }
     if (pathname === '/logs' && req.method === 'GET') {
