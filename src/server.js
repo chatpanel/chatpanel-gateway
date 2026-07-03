@@ -43,7 +43,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.22';
+export const VERSION = '0.6.23';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -760,9 +760,15 @@ export function createGateway(cfg = loadConfig()) {
           send({ type: 'state', state: sttEngine.state() });
           const progressTimer = setInterval(() => {
             const st = sttEngine.state();
-            if (st === 'downloading' || st === 'loading') send({ type: 'progress', state: st, ...(sttEngine.progress() || {}) });
-            else if (st === 'error') { send({ type: 'error', code: 'model_failed', message: sttEngine.health().error || 'model failed to load', fatal: true }); clearInterval(progressTimer); }
-            else { send({ type: 'state', state: st }); clearInterval(progressTimer); }
+            if (st === 'downloading' || st === 'loading') { send({ type: 'progress', state: st, ...(sttEngine.progress() || {}) }); return; }
+            if (st === 'error') { send({ type: 'error', code: 'model_failed', message: sttEngine.health().error || 'model failed to load', fatal: true }); clearInterval(progressTimer); return; }
+            // STT ready — if diarization is on, surface ITS one-time download too, so
+            // "who said what" doesn't silently lag while the speaker model fetches.
+            if (sess.diarize) {
+              const ds = diarizeEngine.state();
+              if (ds === 'downloading' || ds === 'loading') { send({ type: 'diarize-progress', state: ds, ...(diarizeEngine.progress() || {}) }); return; }
+            }
+            send({ type: 'state', state: st }); clearInterval(progressTimer);
           }, 500);
           progressTimer.unref?.();
           // Redaction is async — chain events so finals can't overtake interims.
