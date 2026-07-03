@@ -43,7 +43,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.23';
+export const VERSION = '0.6.24';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -696,6 +696,24 @@ export function createGateway(cfg = loadConfig()) {
         try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
         sttEngine.setModel(id, { onLog: (m) => console.log(m) });
         return sendJson(res, 202, { accepted: true, active: id, state: sttEngine.state(), progress: sttEngine.progress() });
+      }
+    }
+    // Speaker (diarization) model manager — the "who said what" x-vector model.
+    // GET → status + install state; POST → force-download it (ignores the
+    // allowDownload config flag; explicit user action from the Gateway tab).
+    if (pathname === '/diarize/model') {
+      if (req.method === 'GET') {
+        const h = diarizeEngine.health();
+        return sendJson(res, 200, {
+          active: diarizeEngine.DIARIZE_MODEL,
+          state: h.state,
+          progress: diarizeEngine.progress(),
+          available: [{ id: diarizeEngine.DIARIZE_MODEL, label: 'Speaker embeddings (wavlm)', lang: 'any', approxMB: 100, note: 'Tells voices apart for meeting transcription (who said what).', installed: diarizeEngine.modelOnDisk() }],
+        });
+      }
+      if (req.method === 'POST') {
+        diarizeEngine.download({ onLog: (m) => console.log(m) });
+        return sendJson(res, 202, { accepted: true, active: diarizeEngine.DIARIZE_MODEL, state: diarizeEngine.state(), progress: diarizeEngine.progress() });
       }
     }
     if (pathname === '/stt/sessions' && req.method === 'POST') {

@@ -43,6 +43,7 @@ export function modelOnDisk(modelId = DIARIZE_MODEL, dtype = runtimeDtype()) {
   catch { return false; }
 }
 
+/** @param {{ log?: (m: string) => void, allowDownload?: boolean }} [opts] */
 async function load({ log = () => {}, allowDownload = true } = {}) {
   let lib;
   try { lib = await ensureLib(); }
@@ -79,9 +80,22 @@ async function load({ log = () => {}, allowDownload = true } = {}) {
 }
 
 export function init(cfg = {}) {
-  if (_initPromise) return _initPromise;
+  // Retry after a FAILED attempt (single-flight only while loading/ready) — else a
+  // transient failure (e.g. downloads were disabled, or the model wasn't on disk
+  // yet) would be cached forever and never self-heal once the model is present.
+  if (_initPromise && _state !== 'error') return _initPromise;
   _state = 'loading';
   _initPromise = load({ log: cfg.onLog, allowDownload: cfg.allowDownload !== false });
+  return _initPromise;
+}
+
+// Explicit download (the Gateway-tab "Download" button): force the fetch even if
+// the config disabled auto-downloads, and clear any cached failure so it retries.
+/** @param {{ onLog?: (m: string) => void }} [opts] */
+export function download({ onLog } = {}) {
+  _initPromise = null;
+  _state = 'loading';
+  _initPromise = load({ log: onLog, allowDownload: true });
   return _initPromise;
 }
 
@@ -108,10 +122,13 @@ function cosine(a, b) {
   return denom ? d / denom : 0;
 }
 
-// A per-session speaker tracker. `threshold` = min cosine to be the SAME speaker;
-// lower → fewer speakers (merges more), higher → more speakers (splits more).
+// A per-session speaker tracker. NOT limited to 2 speakers — this is embedding +
+// online clustering, so it scales to N (a 10-person meeting is fine; accuracy just
+// softens as more voices sound alike). `threshold` = min cosine to be the SAME
+// speaker (lower → fewer speakers/more merging, higher → more speakers/more
+// splitting); `maxSpeakers` caps the roster (extra turns fold into the nearest).
 export class Diarizer {
-  constructor({ threshold = 0.75, maxSpeakers = 8 } = {}) {
+  constructor({ threshold = 0.75, maxSpeakers = 12 } = {}) {
     this.threshold = threshold;
     this.maxSpeakers = maxSpeakers;
     this.centroids = []; // { id, label, vec: Float32Array, n }
