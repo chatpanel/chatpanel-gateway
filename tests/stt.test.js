@@ -71,12 +71,13 @@ test('runtimeDtype: fp32 on WASM (block-quant unsupported there), q8 on native',
   }
 });
 
-test('custom-id guard: whisper org/name ok; non-whisper + traversal rejected', () => {
+test('custom-id guard: any ASR org/name ok (registry-filtered); traversal/shape rejected', () => {
   assert.ok(isValidCustomSttId('onnx-community/whisper-small.en'));
   assert.ok(isValidCustomSttId('Xenova/whisper-tiny'));
-  assert.ok(!isValidCustomSttId('evil/bert-base'));   // not a whisper model
+  assert.ok(isValidCustomSttId('UsefulSensors/moonshine-base')); // non-whisper ASR, still valid
   assert.ok(!isValidCustomSttId('../etc/passwd'));    // traversal
   assert.ok(!isValidCustomSttId('a/b/c'));            // bad shape
+  assert.ok(!isValidCustomSttId('no-slash'));         // bad shape
 });
 
 test('models POST: catalog id 202, custom whisper id 202, junk 400', async () => {
@@ -86,7 +87,8 @@ test('models POST: catalog id 202, custom whisper id 202, junk 400', async () =>
   const post = (id) => fetch(`${base}/stt/models`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
   assert.equal((await post(DEFAULT_STT_MODEL)).status, 202);
   assert.equal((await post('onnx-community/whisper-small.en')).status, 202); // custom, validated
-  assert.equal((await post('evil/not-a-model')).status, 400);
+  assert.equal((await post('not a model')).status, 400);      // bad shape (space)
+  assert.equal((await post('../etc/passwd')).status, 400);    // traversal
   gw.close();
 });
 
@@ -109,11 +111,11 @@ test('stt disabled in config → 403 on session create', async () => {
   gw.close();
 });
 
-test('unknown stt model id → 400', async () => {
+test('invalid-shape stt model id → 400', async () => {
   const gw = createGateway(cfg());
   const port = await listen(gw);
   const r = await fetch(`http://127.0.0.1:${port}/stt/models`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 'evil/model' }),
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 'no-slash-here' }),
   });
   assert.equal(r.status, 400);
   gw.close();

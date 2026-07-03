@@ -75,11 +75,13 @@ export function sttModelDtype(id) {
   return sttModel(id)?.dtype || null;
 }
 
-// Accept a user-supplied ("Advanced") whisper model id. STRICT: `org/name` shape,
-// must be a whisper export, no path traversal. Curated catalog ids come from the
-// private dl.chatpanel.net mirror; custom ids are fetched from Hugging Face
-// directly (the engine points remoteHost there only for the custom load).
+// Accept a user-supplied / registry-picked STT model id. STRICT `org/name` shape,
+// no path traversal. We DON'T require "whisper" in the id — the extension's model
+// registry only surfaces transformers.js automatic-speech-recognition models
+// (whisper, moonshine, …), all of which load via the ASR pipeline; the engine
+// fails open if a pick turns out incompatible. Curated ids use the private
+// dl.chatpanel.net mirror; custom ids fetch from Hugging Face directly.
 export function isValidCustomSttId(id) {
   const s = String(id || '');
-  return /^[A-Za-z0-9][\w.-]*\/[\w.-]+$/.test(s) && /whisper/i.test(s) && !s.includes('..');
+  return /^[A-Za-z0-9][\w.-]*\/[\w.-]+$/.test(s) && !s.includes('..');
 }
