@@ -5,7 +5,7 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGateway } from '../src/server.js';
 import * as sttEngine from '../src/stt-engine.js';
-import { STT_MODEL_CATALOG, DEFAULT_STT_MODEL, isKnownSttModel, isEnglishOnly } from '../src/stt-models.js';
+import { STT_MODEL_CATALOG, DEFAULT_STT_MODEL, isKnownSttModel, isEnglishOnly, isValidCustomSttId } from '../src/stt-models.js';
 
 function listen(server) {
   return new Promise((res) => server.listen(0, '127.0.0.1', () => res(server.address().port)));
@@ -57,6 +57,37 @@ test('stt catalog: multilingual default (language auto-detect), ids known', () =
   assert.ok(isKnownSttModel(DEFAULT_STT_MODEL));
   assert.ok(STT_MODEL_CATALOG.length >= 2);
   assert.ok(!isKnownSttModel('evil/other'));
+});
+
+test('runtimeDtype: fp32 on WASM (block-quant unsupported there), q8 on native', () => {
+  const prev = globalThis.__CHATPANEL_WASM_PATHS__;
+  try {
+    globalThis.__CHATPANEL_WASM_PATHS__ = { wasm: 'x', mjs: 'y' };
+    assert.equal(sttEngine.runtimeDtype(), 'fp32');
+    delete globalThis.__CHATPANEL_WASM_PATHS__;
+    assert.equal(sttEngine.runtimeDtype(), 'q8');
+  } finally {
+    if (prev) globalThis.__CHATPANEL_WASM_PATHS__ = prev; else delete globalThis.__CHATPANEL_WASM_PATHS__;
+  }
+});
+
+test('custom-id guard: whisper org/name ok; non-whisper + traversal rejected', () => {
+  assert.ok(isValidCustomSttId('onnx-community/whisper-small.en'));
+  assert.ok(isValidCustomSttId('Xenova/whisper-tiny'));
+  assert.ok(!isValidCustomSttId('evil/bert-base'));   // not a whisper model
+  assert.ok(!isValidCustomSttId('../etc/passwd'));    // traversal
+  assert.ok(!isValidCustomSttId('a/b/c'));            // bad shape
+});
+
+test('models POST: catalog id 202, custom whisper id 202, junk 400', async () => {
+  const gw = createGateway(cfg());
+  const port = await listen(gw);
+  const base = `http://127.0.0.1:${port}`;
+  const post = (id) => fetch(`${base}/stt/models`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
+  assert.equal((await post(DEFAULT_STT_MODEL)).status, 202);
+  assert.equal((await post('onnx-community/whisper-small.en')).status, 202); // custom, validated
+  assert.equal((await post('evil/not-a-model')).status, 400);
+  gw.close();
 });
 
 test('health exposes the additive stt block', async () => {

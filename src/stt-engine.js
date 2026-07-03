@@ -20,9 +20,23 @@ import { join } from 'node:path';
 import { existsSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { ensureLib, modelRoot } from './ner-engine.js';
-import { DEFAULT_STT_MODEL, isEnglishOnly } from './stt-models.js';
+import { DEFAULT_STT_MODEL, isEnglishOnly, sttModelDtype, isKnownSttModel } from './stt-models.js';
 
 export const SAMPLE_RATE = 16000; // fixed wire contract: 16 kHz mono Float32 PCM
+
+// The right whisper quantization depends on the ONNX RUNTIME, not the OS:
+//   • native onnxruntime-node (the npm gateway) loads the small, fast `q8`
+//     (_quantized) exports — best size + speed.
+//   • onnxruntime-web WASM (the standalone binary — SAME wasm on macOS/Windows/
+//     Linux, so this is inherently cross-platform) CANNOT load the block-quantized
+//     exports (q8/int8/uint8 → MatMulNBits "missing scale"; fp16 → graph error);
+//     of the loadable ones only `fp32` is fast enough for real-time (q4/bnb4 are
+//     ~8× slower). Verified empirically against the bundled ORT-web build.
+// The binary entry sets __CHATPANEL_WASM_PATHS__, so that global tells us which
+// runtime we're on. A model may override via `dtype` in the STT catalog.
+export function runtimeDtype() {
+  return globalThis.__CHATPANEL_WASM_PATHS__ ? 'fp32' : 'q8';
+}
 
 let _state = 'off';        // 'off' | 'loading' | 'downloading' | 'ready' | 'error'
 let _model = null;         // active model id
@@ -31,13 +45,24 @@ let _err = null;           // last error message (for /health)
 let _initPromise = null;   // single-flight init
 let _progress = null;      // { model, file, pct } while downloading, else null
 
-// Whisper exports ship encoder+decoder ONNX files (not the single model.onnx the
-// NER check looks for), so presence = "any encoder_model*.onnx on disk".
-export function modelOnDisk(modelId = _model || DEFAULT_STT_MODEL) {
+// transformers.js dtype → the ONNX filename suffix it loads. Presence must check
+// the EXACT file the current runtime will fetch — otherwise a q8 install (native)
+// looks "present" to the WASM runtime, which actually needs the fp32 file, and the
+// offline load fails. Checking the real target makes a runtime switch re-download.
+const DTYPE_SUFFIX = {
+  fp32: '', q8: '_quantized', int8: '_int8', uint8: '_uint8',
+  fp16: '_fp16', q4: '_q4', bnb4: '_bnb4', q4f16: '_q4f16',
+};
+
+export function modelOnDisk(modelId = _model || DEFAULT_STT_MODEL, dtype = sttModelDtype(modelId) || runtimeDtype()) {
   const dir = join(modelRoot(), ...modelId.split('/'), 'onnx');
   if (!existsSync(dir)) return false;
-  try { return readdirSync(dir).some((f) => /^encoder_model.*\.onnx$/.test(f)); }
-  catch { return false; }
+  const suffix = DTYPE_SUFFIX[dtype] ?? '';
+  try {
+    const files = readdirSync(dir);
+    return files.includes(`encoder_model${suffix}.onnx`)
+      && files.some((f) => f === `decoder_model_merged${suffix}.onnx` || f === `decoder_model${suffix}.onnx`);
+  } catch { return false; }
 }
 
 export function state() { return _state; }
@@ -71,12 +96,21 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true } = {})
     return false;
   }
 
+  // Curated catalog models come from the private dl.chatpanel.net mirror (ensureLib
+  // already set that as remoteHost). A CUSTOM ("Advanced") id isn't mirrored, so
+  // fetch it from Hugging Face directly — only for this load, then restore.
+  const prevHost = lib.env.remoteHost;
+  const isCustom = !isKnownSttModel(modelId);
+  if (!haveLocal && isCustom) { try { lib.env.remoteHost = 'https://huggingface.co/'; } catch { /* optional */ } }
+
   _state = haveLocal ? 'loading' : 'downloading';
-  if (!haveLocal) { _progress = { model: modelId, file: null, pct: 0 }; log(`[stt] downloading model ${modelId} (one-time)…`); }
+  if (!haveLocal) { _progress = { model: modelId, file: null, pct: 0 }; log(`[stt] downloading model ${modelId} (one-time${isCustom ? ', from Hugging Face' : ''})…`); }
 
   try {
+    // Per-model override wins (catalog `dtype`), else the runtime-appropriate default.
+    const dtype = sttModelDtype(modelId) || runtimeDtype();
     const pipe = await lib.pipeline('automatic-speech-recognition', modelId, {
-      dtype: 'q8',
+      dtype,
       progress_callback: (p) => {
         if (!p) return;
         const pct = typeof p.progress === 'number' ? Math.round(p.progress) : (_progress?.pct ?? 0);
@@ -97,6 +131,8 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true } = {})
     else { _state = 'error'; }
     log(`[stt] model load failed (${e.message})${prevPipe ? ' — keeping previous model' : ''}`);
     return false;
+  } finally {
+    try { lib.env.remoteHost = prevHost; } catch { /* optional */ } // restore the mirror for NER + catalog loads
   }
 }
 

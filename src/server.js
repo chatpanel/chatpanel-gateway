@@ -34,7 +34,7 @@ import { ingestBackup } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
 import * as sttEngine from './stt-engine.js';
 import { MODEL_CATALOG, isKnownModel } from './models.js';
-import { STT_MODEL_CATALOG, isKnownSttModel, DEFAULT_STT_MODEL } from './stt-models.js';
+import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MODEL } from './stt-models.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, persistConfig, configPath } from './configstore.js';
 import { resolveDestination, aggregateModelsAsync } from './router.js';
@@ -42,7 +42,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.18';
+export const VERSION = '0.6.19';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -666,9 +666,14 @@ export function createGateway(cfg = loadConfig()) {
     //   GET/POST /stt/models               catalog + progress / switch (mirrors /ner/models)
     if (pathname === '/stt/models') {
       if (req.method === 'GET') {
-        const available = STT_MODEL_CATALOG.map((m) => ({ ...m, installed: sttEngine.modelOnDisk(m.id) }));
+        const active = sttEngine.health().model || cfg.stt?.model || DEFAULT_STT_MODEL;
+        const available = /** @type {any[]} */ (STT_MODEL_CATALOG.map((m) => ({ ...m, installed: sttEngine.modelOnDisk(m.id) })));
+        // Surface an active CUSTOM (non-catalog) model so the UI can show it too.
+        if (active && !available.some((m) => m.id === active)) {
+          available.push({ id: active, label: active, lang: '—', tier: 'custom', custom: true, installed: sttEngine.modelOnDisk(active), note: 'Custom model (from Hugging Face).' });
+        }
         return sendJson(res, 200, {
-          active: sttEngine.health().model || cfg.stt?.model || DEFAULT_STT_MODEL,
+          active,
           state: sttEngine.state(),
           progress: sttEngine.progress(),
           available,
@@ -677,8 +682,9 @@ export function createGateway(cfg = loadConfig()) {
       if (req.method === 'POST') {
         let body = null;
         try { body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')); } catch { body = null; }
-        const id = body && typeof body.id === 'string' ? body.id : null;
-        if (!id || !isKnownSttModel(id)) return sendJson(res, 400, { error: { message: 'unknown model id', type: 'bad_model' } });
+        const id = body && typeof body.id === 'string' ? body.id.trim() : null;
+        // Curated catalog OR a strictly-validated custom whisper id (Advanced).
+        if (!id || !(isKnownSttModel(id) || isValidCustomSttId(id))) return sendJson(res, 400, { error: { message: 'unknown or invalid model id', type: 'bad_model' } });
         if (cfg.stt) cfg.stt.model = id; else cfg.stt = { enabled: true, model: id, allowDownload: true };
         try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
         sttEngine.setModel(id, { onLog: (m) => console.log(m) });
