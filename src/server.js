@@ -43,7 +43,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.24';
+export const VERSION = '0.6.25';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -499,7 +499,9 @@ export function createGateway(cfg = loadConfig()) {
       const stt = sttEngine.health();
       return sendJson(res, 200, {
         ok: true, version: VERSION, backend: cfg.backend, tier: cfg.redaction.tier,
-        stt: { enabled: cfg.stt?.enabled !== false, state: stt.state, ready: stt.ok, model: stt.model || cfg.stt?.model || DEFAULT_STT_MODEL },
+        // `runtime` = 'native' (npm, fast quantized) | 'wasm' (binary, slow fp32) —
+        // the extension uses it to advise the far-faster native gateway.
+        stt: { enabled: cfg.stt?.enabled !== false, state: stt.state, ready: stt.ok, model: stt.model || cfg.stt?.model || DEFAULT_STT_MODEL, runtime: stt.runtime, dtype: stt.dtype },
       });
     }
 

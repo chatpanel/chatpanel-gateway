@@ -39,6 +39,14 @@ export function runtimeDtype() {
   return globalThis.__CHATPANEL_WASM_PATHS__ ? 'fp32' : 'q8';
 }
 
+// Which ONNX runtime is active: the standalone binary uses onnxruntime-web WASM
+// (fp32-only, single-thread — ~10× slower); the npm package uses onnxruntime-node
+// (native, quantized q8). The extension surfaces this so users on the slow WASM
+// build know the native gateway is far faster.
+export function runtimeName() {
+  return globalThis.__CHATPANEL_WASM_PATHS__ ? 'wasm' : 'native';
+}
+
 let _state = 'off';        // 'off' | 'loading' | 'downloading' | 'ready' | 'error'
 let _model = null;         // active model id
 let _pipe = null;          // the loaded automatic-speech-recognition pipeline
@@ -72,7 +80,7 @@ export function isReady() { return _state === 'ready' && !!_pipe; }
 export function progress() { return _progress; }
 
 export function health() {
-  return { configured: _state !== 'off', ok: isReady(), state: _state, model: _model, dtype: _dtype, error: _err };
+  return { configured: _state !== 'off', ok: isReady(), state: _state, model: _model, dtype: _dtype, runtime: runtimeName(), error: _err };
 }
 
 // (Re)load a model into _pipe. Same contract as ner-engine.loadModel: fail-open,
