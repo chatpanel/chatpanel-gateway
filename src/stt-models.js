@@ -53,7 +53,28 @@ export const STT_MODEL_CATALOG = [
     ramMB: 3200,
     note: 'Best accuracy. For powerful machines; use the native (npm) gateway for speed.',
   },
+  {
+    // NOT a whisper/seq2seq model — a NeMo TDT transducer. It doesn't run through the
+    // transformers.js ASR pipeline; the STT engine routes `engine: 'parakeet-tdt'`
+    // models to parakeet-engine.js (raw onnxruntime + a greedy TDT decode). Multilingual
+    // (25 European languages, auto-detected) and ~35× realtime at int8 on the native
+    // (npm) gateway — the fast local-dictation path. WASM runs it but slower.
+    id: 'istupakov/parakeet-tdt-0.6b-v3-onnx',
+    label: 'Parakeet TDT 0.6B v3 (multilingual, fast)',
+    lang: '25 European languages (auto-detected)',
+    tier: 'accurate',
+    engine: 'parakeet-tdt',
+    approxMB: 690,   // int8: encoder 652 + decoder_joint 18 + preprocessor
+    ramMB: 1600,
+    note: 'NVIDIA Parakeet transducer — several× faster than Whisper at similar accuracy. English + 24 EU languages. Best on the native (npm) gateway.',
+  },
 ];
+
+// STT engine backing a model. Default 'whisper' = the transformers.js ASR pipeline;
+// 'parakeet-tdt' = the raw-onnxruntime transducer engine (parakeet-engine.js).
+export function sttModelEngine(id) {
+  return sttModel(id)?.engine || 'whisper';
+}
 
 export function isKnownSttModel(id) {
   return STT_MODEL_CATALOG.some((m) => m.id === id);

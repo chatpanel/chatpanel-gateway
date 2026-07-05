@@ -20,7 +20,8 @@ import { join } from 'node:path';
 import { existsSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { ensureLib, modelRoot } from './ner-engine.js';
-import { DEFAULT_STT_MODEL, isEnglishOnly, sttModelDtype, isKnownSttModel } from './stt-models.js';
+import { DEFAULT_STT_MODEL, isEnglishOnly, sttModelDtype, isKnownSttModel, sttModelEngine } from './stt-models.js';
+import * as parakeet from './parakeet-engine.js';
 import * as diarize from './diarize-engine.js';
 
 export const SAMPLE_RATE = 16000; // fixed wire contract: 16 kHz mono Float32 PCM
@@ -65,6 +66,8 @@ const DTYPE_SUFFIX = {
 };
 
 export function modelOnDisk(modelId = _model || DEFAULT_STT_MODEL, dtype = sttModelDtype(modelId) || runtimeDtype()) {
+  // Transducer models (parakeet) have a different file layout + engine — delegate.
+  if (sttModelEngine(modelId) === 'parakeet-tdt') return parakeet.parakeetOnDisk(modelId, parakeet.parakeetDtype(dtype));
   const dir = join(modelRoot(), ...modelId.split('/'), 'onnx');
   if (!existsSync(dir)) return false;
   const suffix = DTYPE_SUFFIX[dtype] ?? '';
@@ -87,6 +90,9 @@ export function health() {
 // and a failed SWITCH keeps the previous working pipeline.
 /** @param {string} modelId @param {{ log?: (m: string) => void, allowDownload?: boolean, dtype?: string }} [opts] */
 async function loadModel(modelId, { log = () => {}, allowDownload = true, dtype: dtypeOverride = null } = {}) {
+  // Transducer models aren't whisper pipelines — hand off to the parakeet engine.
+  if (sttModelEngine(modelId) === 'parakeet-tdt') return loadParakeet(modelId, { log, allowDownload, dtype: dtypeOverride });
+
   const prevPipe = _pipe;
   const prevModel = _model;
   let lib;
@@ -160,6 +166,52 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true, dtype:
   }
 }
 
+// Load a Parakeet TDT (transducer) model via parakeet-engine.js (raw onnxruntime), and
+// expose it to the session layer as a whisper-shaped `_pipe(audio) → { text }` adapter,
+// so decodeSession/streaming/redaction/diarization all work unchanged. Fail-open and
+// keep-previous-on-switch-failure, exactly like the whisper path above.
+/** @param {string} modelId @param {{ log?: (m: string) => void, allowDownload?: boolean, dtype?: string|null }} [opts] */
+async function loadParakeet(modelId, { log = () => {}, allowDownload = true, dtype: dtypeOverride = null } = {}) {
+  const prevPipe = _pipe;
+  const prevModel = _model;
+  const dtype = parakeet.parakeetDtype(dtypeOverride && dtypeOverride !== 'auto' ? dtypeOverride : PARAKEET_RUNTIME_DTYPE());
+  const haveLocal = parakeet.parakeetOnDisk(modelId, dtype);
+  if (!haveLocal && !allowDownload) {
+    _state = 'error'; _err = 'model not on disk and downloads disabled';
+    log(`[stt] model ${modelId} not installed and downloads disabled`);
+    return false;
+  }
+  _state = haveLocal ? 'loading' : 'downloading';
+  if (!haveLocal) { _progress = { model: modelId, file: null, pct: 0 }; log(`[stt] downloading model ${modelId} (one-time, from Hugging Face)…`); }
+  try {
+    const rec = await parakeet.loadRecognizer({
+      modelId, dtype, allowDownload, log,
+      onProgress: (p) => { _progress = { model: modelId, file: p.file || null, pct: typeof p.pct === 'number' ? p.pct : (_progress?.pct ?? 0) }; },
+    });
+    // whisper-shaped adapter: ignores the whisper `{ language, task }` opts (parakeet
+    // auto-detects language) and returns { text }. `__parakeet` flags the language-ID
+    // short-circuit; `dispose` frees the ORT sessions on switch.
+    const adapter = async (audio) => ({ text: await rec.transcribe(audio) });
+    adapter.__parakeet = true;
+    adapter.dispose = () => rec.dispose();
+    _pipe = adapter; _model = modelId; _state = 'ready'; _err = null; _progress = null; _dtype = dtype;
+    if (prevPipe && prevPipe !== adapter) { try { await prevPipe.dispose?.(); } catch { /* ignore */ } }
+    log(`[stt] ready — model ${modelId} @ ${dtype} (parakeet-tdt, in-process, offline) — local dictation active`);
+    return true;
+  } catch (e) {
+    _err = e.message; _progress = null;
+    if (prevPipe) { _pipe = prevPipe; _model = prevModel; _state = 'ready'; }
+    else { _state = 'error'; }
+    log(`[stt] model load failed (${e.message})${prevPipe ? ' — keeping previous model' : ''}`);
+    return false;
+  }
+}
+
+// Parakeet only ships int8 + fp32 exports (no whisper-style q8). int8 loads and runs on
+// BOTH runtimes; only force fp32 if a caller explicitly asks. Independent of the whisper
+// runtimeDtype (which returns q8/fp32).
+function PARAKEET_RUNTIME_DTYPE() { return parakeet.PARAKEET_DEFAULT_DTYPE; }
+
 // Load the configured model once, on FIRST USE (never at gateway startup — the
 // download is deferred until someone actually dictates). Single-flight.
 export function init(cfg = {}) {
@@ -174,8 +226,11 @@ export function init(cfg = {}) {
 export async function setModel(modelId, opts = {}) {
   const log = typeof opts.onLog === 'function' ? opts.onLog : () => {};
   if (!modelId) return false;
-  // Re-load if the model OR the requested precision changed.
-  const wantDtype = opts.dtype && opts.dtype !== 'auto' ? opts.dtype : (sttModelDtype(modelId) || runtimeDtype());
+  // Re-load if the model OR the requested precision changed. Parakeet has its own
+  // dtype domain (int8/fp32), independent of whisper's q8/fp32 runtimeDtype.
+  const wantDtype = sttModelEngine(modelId) === 'parakeet-tdt'
+    ? parakeet.parakeetDtype(opts.dtype && opts.dtype !== 'auto' ? opts.dtype : parakeet.PARAKEET_DEFAULT_DTYPE)
+    : (opts.dtype && opts.dtype !== 'auto' ? opts.dtype : (sttModelDtype(modelId) || runtimeDtype()));
   if (modelId === _model && isReady() && _dtype === wantDtype) return true;
   return loadModel(modelId, { log, allowDownload: opts.allowDownload !== false, dtype: opts.dtype });
 }
@@ -348,7 +403,7 @@ async function decodeSession(s, { flush = false } = {}) {
 
   // Auto-detect the spoken language on the session's first voiced audio (≥1s),
   // then pin it. An explicit client `lang` wins; `.en` models skip all of this.
-  if (!s.lang && !s.langTried && !isEnglishOnly(_model) && audio.length >= SAMPLE_RATE) {
+  if (!s.lang && !s.langTried && !isEnglishOnly(_model) && !_pipe?.__parakeet && audio.length >= SAMPLE_RATE) {
     s.langTried = true;
     const detected = await detectLanguage(audio);
     if (detected) { s.lang = detected; emit(s, { type: 'language', lang: detected }); }
