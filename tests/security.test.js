@@ -110,3 +110,38 @@ test('outbound SSRF: loopback baseUrl is allowed through the guard (Ollama/LM St
   assert.doesNotMatch(r.body, /blocked address/); // …but was NOT blocked by the SSRF guard
   gw.close();
 });
+
+// M2 — admin routes (reconfigure / logs) require the extension Origin or the gateway
+// token; the /v1 data plane and /health stay open for local CLIs.
+test('admin /config is blocked for a no-Origin local process', async () => {
+  const gw = createGateway(cfg());
+  const port = await listen(gw);
+  const r = await request(port, { path: '/config' }); // no Origin, no token
+  assert.equal(r.status, 403);
+  assert.match(r.body, /admin route/);
+  gw.close();
+});
+
+test('admin /logs is blocked without the extension origin/token', async () => {
+  const gw = createGateway(cfg());
+  const port = await listen(gw);
+  const r = await request(port, { path: '/logs' });
+  assert.equal(r.status, 403);
+  gw.close();
+});
+
+test('admin /config is allowed for the extension origin', async () => {
+  const gw = createGateway(cfg());
+  const port = await listen(gw);
+  const r = await request(port, { path: '/config', headers: { origin: 'chrome-extension://abc' } });
+  assert.equal(r.status, 200); // reaches the real handler
+  gw.close();
+});
+
+test('data plane /health stays open to a no-Origin client (not an admin route)', async () => {
+  const gw = createGateway(cfg());
+  const port = await listen(gw);
+  const r = await request(port, { path: '/health' });
+  assert.equal(r.status, 200);
+  gw.close();
+});

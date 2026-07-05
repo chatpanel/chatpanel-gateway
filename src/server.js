@@ -23,6 +23,7 @@ import { startEntitlementRefresh, maybeRevalidate } from './entitlement-refresh.
 import { redactSegments, segment } from './redact.js';
 import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer } from './stream.js';
 import { restoreText, gatedDictionary, narrowSpecs, makeToolHarness, placeholderToolNote, assertEndpointUrl } from '@chatpanel/pii';
+import { ensureGatewayToken, isAdminAuthorized } from './gateway-token.js';
 import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
 import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
 import { shaperFor } from './shape.js';
@@ -497,6 +498,14 @@ export function createGateway(cfg = loadConfig()) {
     if (req.headers.origin) setCors(res, req.headers.origin);
     if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
+    // M2: ADMIN routes reconfigure the gateway (POST /config) or expose its in-memory
+    // logs (GET /logs). Unlike the /v1 data plane (open to any local client — the
+    // product), these must not be reachable by a no-Origin local process or a drive-by
+    // localhost web page. Require the extension Origin or the gateway token.
+    if ((pathname === '/config' || pathname === '/logs') && !isAdminAuthorized(req)) {
+      return sendJson(res, 403, { error: 'admin route: extension origin or gateway token required' });
+    }
+
     if (req.method === 'GET' && pathname === '/health') {
       // `stt` is ADDITIVE (Tesla rule): old clients ignore it, new clients use it
       // to auto-detect local dictation. `enabled` reflects config; the model only
@@ -964,6 +973,7 @@ export function createGateway(cfg = loadConfig()) {
 
 export function start(cfg = loadConfig()) {
   installTimestampedConsole(); // every gateway log line gets a clock — before anything logs
+  ensureGatewayToken(); // M2: load/create the admin-route token (best-effort)
   const server = createGateway(cfg);
   const ner = startNer(cfg); // may mutate cfg.redaction when it comes up
   // Re-validate the stored Pro entitlement online on an interval, so a refunded /
@@ -989,6 +999,12 @@ export function start(cfg = loadConfig()) {
     console.log(`  backend  : ${cfg.backend}` + (cfg.backend === 'bridge' ? ` (agent: ${cfg.bridge.agent}, via ${cfg.bridge.url})` : ''));
     console.log(`  redaction: ${cfg.redaction.tier}` + (cfg.redaction.detection?.backend && cfg.redaction.detection.backend !== 'off'
       ? ` + ${cfg.redaction.detection.backend} detector` : (cfg.ner?.autostart ? ' (+ NER starting…)' : '')));
+    // M7: a non-loopback bind exposes the gateway on the LAN, where the per-request
+    // loopback Host check is trivially satisfied by a spoofed `Host: 127.0.0.1`. The
+    // /v1 data plane forwards with the client's own key, but make the exposure LOUD.
+    if (!isLoopbackHost(cfg.host)) {
+      console.error(`⚠ SECURITY: gateway bound to NON-LOOPBACK host ${cfg.host}. It is reachable off-machine, and the loopback Host-header check is spoofable from the LAN. Admin routes still need the token/extension, but prefer binding 127.0.0.1 unless you intend LAN exposure on a trusted network.`);
+    }
   });
   // If the user handed off a backup key, refresh the warm store from the latest
   // daily backup in the background — so the gateway stays current even when the
