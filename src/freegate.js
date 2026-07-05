@@ -1,20 +1,11 @@
-// Free vs Pro for the gateway runtime — the "taste" gate.
-//
-// Free (no entitlement token): full-tier redaction works, but only for a fixed
-// LIFETIME number of redactions (FREE_TOTAL_CAP) — a real trial of the genuine
-// thing, then you buy. Pro (a valid ChatPanel entitlement token — the same
-// offline-signed token the extension and bridge use) unlocks UNLIMITED redaction.
-// The cryptographic check (entitlement.js) means a forked UI can't unlock it —
-// only the configured/paid token does.
-//
-// The cap is LIFETIME (overall), not per-day, and it is NOT user-editable — so a
-// free user gets exactly FREE_TOTAL_CAP genuine redactions, full stop. The count
-// persists in cfg.pro.free.used (written via configstore.persistConfig), so it
-// survives restarts.
+// Free vs Pro for the gateway runtime. Without an entitlement token, full-tier
+// redaction is available for a fixed lifetime number of redactions (FREE_TOTAL_CAP);
+// a valid ChatPanel entitlement token unlocks unlimited redaction. The count is
+// stored in cfg.pro.free.used (persisted via configstore.persistConfig).
 
 import { isProEntitled } from './entitlement.js';
 
-// The lifetime free allowance. Fixed — deliberately NOT configurable.
+// The lifetime free allowance.
 export const FREE_TOTAL_CAP = 100;
 
 const proCache = { token: null, val: false };
@@ -34,10 +25,10 @@ export async function resolvePro(token) {
   return val;
 }
 
-// May this request still redact? Pro = always. Free = allowed until the lifetime
-// cap is reached, then refused so the client gets a clear upsell. This only
-// CHECKS — the count is advanced by consume() AFTER a redaction actually happens,
-// so requests with nothing to redact don't burn the allowance.
+// May this request still redact? Pro = always; Free = allowed until the lifetime
+// cap is reached. This only CHECKS — consume() advances the count after a
+// redaction actually happens, so requests with nothing to redact don't consume
+// allowance.
 export function checkQuota(cfg, isPro) {
   if (isPro) return { allowed: true, remaining: Infinity, isPro: true };
   const used = Number(cfg.pro?.free?.used) || 0;

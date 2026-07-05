@@ -1,25 +1,15 @@
-// Online entitlement re-validation — closes the refund/revoke abuse window.
-//
-// The gateway stores ONE offline-signed entitlement token (pushed once from the
-// extension via POST /config). Verified purely offline (entitlement.js), that token
-// keeps unlocking Pro until its `exp` — up to 7 days — EVEN AFTER the subscription
-// is refunded, cancelled, or the seat is revoked. The extension/bridge avoid this
-// by re-polling the license worker; the gateway didn't, so a refund left unlimited
-// redaction open for the rest of the token's life.
-//
-// So we also re-check ONLINE on an interval: poll the worker's /entitlement for the
-// token's install_id and either
-//   • REFRESH the stored token (still entitled) — so it never lapses while paid, and
-//   • CLEAR it (worker says valid:false → refunded/cancelled/revoked) — dropping the
-//     gateway to Free immediately instead of riding the offline exp.
-// Network/worker errors NEVER revoke (fail-open for paying users); the offline `exp`
-// still bounds the worst case. Bounds post-refund Pro to <= CHECK_INTERVAL_MS.
+// Online entitlement re-validation. The gateway stores one offline-signed
+// entitlement token and verifies it offline (entitlement.js). On an interval it also
+// re-checks online: it polls the worker's /entitlement for the token's install_id and
+// either refreshes the stored token (still entitled) or clears it (worker reports
+// valid:false), dropping the gateway to Free. Network/worker errors never revoke
+// (fail-open); the offline `exp` still bounds the token's lifetime.
 
 import { persistConfig, configPath } from './configstore.js';
 
 // Same worker the extension/bridge use. Overridable for self-hosted/test.
 const API_BASE = (process.env.CHATPANEL_API_BASE || 'https://api.chatpanel.net').replace(/\/+$/, '');
-const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1h — the autonomous post-refund Pro window
+const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1h — online re-check interval
 const FIRST_CHECK_DELAY_MS = 30 * 1000;   // let the server settle before first poll
 const MIN_RECHECK_MS = 2 * 60 * 1000;     // throttle on-demand (/status) re-checks
 
@@ -63,7 +53,7 @@ async function revalidate(cfg) {
       try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
     }
   } else if (data && data.valid === false) {
-    // Refunded / cancelled / seat revoked → drop Pro NOW (don't wait out the exp).
+    // Worker reports the token is no longer valid → clear it and drop to Free.
     cfg.pro.entitlementToken = '';
     try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
     console.log('[gateway] entitlement no longer valid — Pro deactivated (refund/revoke/seat lost).');

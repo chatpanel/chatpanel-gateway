@@ -1,8 +1,8 @@
-// Free-tier "taste" gate: without a Pro entitlement token, the gateway still does
-// genuine full-tier redaction, but only for a FIXED LIFETIME allowance
-// (freegate.FREE_TOTAL_CAP). A credit is burned only when a request actually
-// redacts something; once the allowance is gone, requests are refused with an
-// upsell. (Pro-token verification is exercised by entitlement.js.)
+// Verifies the free allowance: without an entitlement token the gateway does
+// full-tier redaction for a fixed lifetime number of redactions
+// (freegate.FREE_TOTAL_CAP). A credit is consumed only when a request actually
+// redacts something; once the allowance is used up, requests are refused.
+// (Pro-token verification is exercised by entitlement.js.)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -65,7 +65,7 @@ test('free tier: a credit is burned only when something is actually redacted', a
   if (prev === undefined) delete process.env.CHATPANEL_GATEWAY_CONFIG; else process.env.CHATPANEL_GATEWAY_CONFIG = prev;
 });
 
-test('free tier: requests past the lifetime allowance are refused (402 upsell)', async () => {
+test('free tier: requests past the lifetime allowance are refused (402)', async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'gw-free-'));
   const prev = process.env.CHATPANEL_GATEWAY_CONFIG;
   process.env.CHATPANEL_GATEWAY_CONFIG = path.join(dir, 'gateway.config.json');

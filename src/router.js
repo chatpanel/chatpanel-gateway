@@ -11,7 +11,7 @@
 //     models: [..],             models this destination serves (for /v1/models)
 //   }
 
-import { assertEndpointUrl } from '@chatpanel/pii';
+import { secureFetch } from './secure-fetch.js';
 //
 // /v1/models aggregates every destination's models so clients can discover them.
 
@@ -89,8 +89,8 @@ export async function aggregateModelsAsync(cfg, { timeoutMs = 4000 } = {}) {
         if (d.protocol === 'anthropic') { headers['x-api-key'] = d.apiKey; headers['anthropic-version'] = '2023-06-01'; }
         else headers.authorization = `Bearer ${d.apiKey}`;
       }
-      const modelsUrl = assertEndpointUrl(`${d.baseUrl.replace(/\/$/, '')}/models`).toString(); // SSRF guard (skips a blocked dest via the catch)
-      const res = await fetch(modelsUrl, { headers, signal: ctrl.signal });
+      // secureFetch: SSRF guard (scheme/host + resolved-IP); a blocked dest throws → skipped via the catch.
+      const res = await secureFetch(`${d.baseUrl.replace(/\/$/, '')}/models`, { headers, signal: ctrl.signal });
       if (!res.ok) return;
       const j = await res.json();
       const list = Array.isArray(j?.data) ? j.data : (Array.isArray(j?.models) ? j.models : []);

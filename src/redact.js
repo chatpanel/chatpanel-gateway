@@ -14,10 +14,10 @@ import * as engine from './ner-engine.js';
 // tier: 'basic' | 'full'. For 'full' we run the local detector over the combined
 // text to harvest names/orgs, then redact every segment against that entity set.
 //
-// Free vs Pro on the gateway: the free trial is limited by a REQUEST QUOTA
-// (freegate.js), not by downgrading quality — so free users get the REAL tier
-// (names/orgs via NER) within their allowance. The custom dictionary, though, is
-// still a Pro power feature: gatedDictionary caps it to FREE_DICT_LIMIT for free.
+// Free use is bounded by a request quota (freegate.js), not by downgrading
+// quality — free requests get the full tier (names/orgs via NER) within their
+// allowance. The custom dictionary is capped for free: gatedDictionary limits it
+// to FREE_DICT_LIMIT via the shared chatpanel-pii gate.
 export async function redactSegments(segments, redactionCfg, { signal, isPro = true } = {}) {
   const vault = createVault();
 
@@ -38,7 +38,7 @@ export async function redactSegments(segments, redactionCfg, { signal, isPro = t
   const texts = segments.map((s) => s.get()).filter((t) => typeof t === 'string' && t);
   if (texts.length === 0) return { vault, count: 0, sanitized };
 
-  // Use the configured tier as-is (no free downgrade — the quota is the free gate),
+  // Use the configured tier as-is (no free downgrade — the quota bounds free use),
   // but keep the dictionary capped for free via the shared chatpanel-pii gate.
   const tier = redactionCfg.tier === 'full' ? 'full' : 'basic';
   const dictionary = gatedDictionary(redactionCfg, isPro);

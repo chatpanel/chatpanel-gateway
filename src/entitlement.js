@@ -1,11 +1,6 @@
-// Offline Pro/Team entitlement verification — the HARD gate for paid features
-// (e.g. custom "bring your own CLI" agents).
-//
-// The license server (Cloudflare Worker) signs a compact entitlement token with
-// an ECDSA P-256 private key that lives ONLY there. The bridge ships the matching
-// PUBLIC key and verifies the signature locally — no network, no secret. A forked
-// client or a raw `curl` to the bridge can't forge entitlement without the
-// private key, so this is a real cryptographic gate, not a UI check.
+// Offline entitlement verification. The license server signs an ECDSA P-256 token;
+// the gateway ships the matching public key and verifies it locally. Gates paid
+// features such as custom "bring your own CLI" agents.
 //
 // Token format (identical to the extension's, extension/js/license.js):
 //   token   = base64url(JSON payload) + "." + base64url(raw ECDSA signature)

@@ -53,8 +53,7 @@ export function publicConfig(cfg, { proUnlocked = false } = {}) {
     ner: cfg.ner,
     stt: cfg.stt,
     allowedOrigins: Array.isArray(cfg.allowedOrigins) ? cfg.allowedOrigins : [],
-    // free = lifetime trial usage ({ used, cap, remaining }) — read-only; the cap
-    // is fixed and the count is server-authoritative (never settable from the UI).
+    // free = lifetime trial usage ({ used, cap, remaining }), read-only.
     pro: { unlocked: proUnlocked, hasToken: !!cfg.pro?.entitlementToken, free: usage(cfg) },
     logRequests: !!cfg.logRequests,
     logDetail: ['types', 'values'].includes(cfg.logDetail) ? cfg.logDetail : 'off',
@@ -112,9 +111,8 @@ export function applyConfigPatch(cfg, patch = {}) {
   if (Array.isArray(patch.allowedOrigins)) cfg.allowedOrigins = patch.allowedOrigins;
   if (patch.pro && typeof patch.pro === 'object') {
     if (typeof patch.pro.entitlementToken === 'string') cfg.pro.entitlementToken = patch.pro.entitlementToken;
-    // NOTE: the free trial is a FIXED lifetime cap (freegate.FREE_TOTAL_CAP) and
-    // its `used` count is server-authoritative — neither is editable here, so a
-    // client can't raise the cap or reset its own trial.
+    // The free allowance (freegate.FREE_TOTAL_CAP) and its `used` count are not
+    // part of the editable patch.
   }
   // Local dictation toggle. The MODEL is switched via POST /stt/models (like the
   // NER manager), not patched here.

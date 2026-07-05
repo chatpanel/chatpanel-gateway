@@ -24,6 +24,7 @@ import { redactSegments, segment } from './redact.js';
 import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer } from './stream.js';
 import { restoreText, gatedDictionary, narrowSpecs, makeToolHarness, placeholderToolNote, assertEndpointUrl } from '@chatpanel/pii';
 import { ensureGatewayToken, isAdminAuthorized } from './gateway-token.js';
+import { secureFetch } from './secure-fetch.js';
 import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
 import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
 import { shaperFor } from './shape.js';
@@ -256,8 +257,8 @@ async function probeNerHealth(cfg) {
   const url = nerBaseUrl(cfg);
   if (!url) return { configured: false, ok: false, url: null, model: null };
   try {
-    const healthUrl = assertEndpointUrl(url.replace(/\/ner\/?$/, '') + '/health').toString();
-    const r = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) });
+    // secureFetch: scheme + host policy AND resolved-IP validation (DNS-rebinding).
+    const r = await secureFetch(url.replace(/\/ner\/?$/, '') + '/health', { signal: AbortSignal.timeout(2000) });
     if (!r.ok) return { configured: true, ok: false, url, model: null };
     const j = await r.json().catch(() => ({}));
     return { configured: true, ok: true, url, model: j.model || null };
@@ -308,8 +309,8 @@ async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, 
   const { messages, system } = adapter.toTurn(body);
   const token = readBridgeToken(cfg.bridge.token);
   const shaper = shaperFor(kind, body?.model || agent);
-  // Full tier for everyone here (the free allowance is enforced by the quota gate
-  // in the main handler), but the custom dictionary stays capped for free.
+  // Full tier for everyone here (the free allowance is enforced in the main
+  // handler), but the custom dictionary stays capped for free.
   const redactOpts = { tier: cfg.redaction.tier === 'full' ? 'full' : 'basic', dictionary: gatedDictionary(cfg.redaction, isPro), entities: [] };
   const s = createRelaySession({ vault, redactOpts, bridgeUrl: cfg.bridge.url, token, harness });
   const ttl = setTimeout(() => endRelaySession(s.id), 135_000); // bridge tool-call timeout is 120s
@@ -635,8 +636,8 @@ export function createGateway(cfg = loadConfig()) {
         if (!url) return sendJson(res, 503, { error: { message: 'NER not configured — deterministic-only redaction', type: 'ner_off' } });
         try {
           const body = await readBody(req, cfg.maxBodyBytes);
-          assertEndpointUrl(url); // block metadata/non-http(s) before POSTing raw text to the detector
-          const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(8000) });
+          // secureFetch: scheme/host policy + resolved-IP check before POSTing raw text to the detector.
+          const r = await secureFetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(8000) });
           const text = await r.text();
           res.writeHead(r.status, { 'content-type': 'application/json' });
           return res.end(text);
@@ -907,9 +908,9 @@ export function createGateway(cfg = loadConfig()) {
           body.tools = narrowSpecs(body.tools, latestUserText(body, r.kind), { cap, keep, name: toolName, description: toolDesc });
           narrowedTools = before - body.tools.length;
         }
-        // Free/Pro gate: free users get the REAL thing (full-tier redaction), but
-        // only for a fixed lifetime allowance — checked here, consumed below once a
-        // redaction actually happens. Over the cap → 402 upsell.
+        // Free users get full-tier redaction within a fixed lifetime allowance —
+        // checked here, consumed below once a redaction actually happens. Over the
+        // cap returns 402.
         isPro = await resolvePro(cfg.pro?.entitlementToken);
         const allow = checkQuota(cfg, isPro);
         if (!allow.allowed) {
@@ -922,16 +923,16 @@ export function createGateway(cfg = loadConfig()) {
         const ac = new AbortController();
         req.on('close', () => ac.abort());
         const rd0 = trace ? trace.clock() : 0;
-        // Redact at the configured tier for everyone (free users get genuine
-        // name/org redaction within their allowance, not a downgraded preview);
-        // the custom dictionary stays capped for free (isPro decides that inside).
+        // Redact at the configured tier for everyone (free users get name/org
+        // redaction within their allowance); the custom dictionary stays capped for
+        // free (isPro decides that inside).
         const { vault: v, count, sanitized } = await redactSegments(segs, cfg.redaction, { signal: ac.signal, isPro });
         if (trace) trace.lap('redact', rd0);
         vault = v;
         redactedCount = count;
         sanitizedCount = sanitized || 0;
-        // Burn one lifetime free credit only when we actually redacted something,
-        // then persist so the count survives a restart. (No-op / no write for Pro.)
+        // Consume one lifetime free credit only when we actually redacted
+        // something, then persist. (No-op / no write for Pro.)
         if (!isPro && count > 0) {
           consume(cfg, isPro);
           try { persistConfig(cfg, configPath()); } catch { /* best effort — usage is advisory */ }
@@ -976,9 +977,9 @@ export function start(cfg = loadConfig()) {
   ensureGatewayToken(); // M2: load/create the admin-route token (best-effort)
   const server = createGateway(cfg);
   const ner = startNer(cfg); // may mutate cfg.redaction when it comes up
-  // Re-validate the stored Pro entitlement online on an interval, so a refunded /
-  // revoked subscription drops the gateway to Free instead of riding the offline
-  // token to its exp (see entitlement-refresh.js).
+  // Re-validate the stored entitlement online on an interval; clears it and drops
+  // the gateway to Free when the worker reports it invalid (see
+  // entitlement-refresh.js).
   const entitlement = startEntitlementRefresh(cfg);
   // Fail LOUD on a port clash instead of crashing with a raw stack trace. We bind a
   // FIXED port (4320) so the extension / install.sh / OpenCode can always find us; if
