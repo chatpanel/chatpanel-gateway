@@ -64,11 +64,17 @@ export const STT_MODEL_CATALOG = [
     lang: '25 European languages (auto-detected)',
     tier: 'accurate',
     engine: 'parakeet-tdt',
+    recommended: true,   // our default recommendation: faster + more accurate than Whisper.
     approxMB: 690,   // int8: encoder 652 + decoder_joint 18 + preprocessor
     ramMB: 1600,
-    note: 'NVIDIA Parakeet transducer — several× faster than Whisper at similar accuracy. English + 24 EU languages. Best on the native (npm) gateway.',
+    note: 'Recommended — NVIDIA Parakeet transducer. Several× faster than Whisper at similar or better accuracy, English + 24 EU languages. One-time download; best on the native (npm) gateway.',
   },
 ];
+
+// The model we steer users to (a bigger, on-demand download — NOT the boot default,
+// which stays a small model so first dictation works instantly). The settings UI
+// surfaces this so users can install it after the gateway is running.
+export const RECOMMENDED_STT_MODEL = 'istupakov/parakeet-tdt-0.6b-v3-onnx';
 
 // STT engine backing a model. Default 'whisper' = the transformers.js ASR pipeline;
 // 'parakeet-tdt' = the raw-onnxruntime transducer engine (parakeet-engine.js).
