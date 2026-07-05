@@ -22,7 +22,7 @@ import { loadConfig } from './config.js';
 import { startEntitlementRefresh, maybeRevalidate } from './entitlement-refresh.js';
 import { redactSegments, segment } from './redact.js';
 import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer } from './stream.js';
-import { restoreText, gatedDictionary, narrowSpecs, makeToolHarness, placeholderToolNote } from '@chatpanel/pii';
+import { restoreText, gatedDictionary, narrowSpecs, makeToolHarness, placeholderToolNote, assertEndpointUrl } from '@chatpanel/pii';
 import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
 import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
 import { shaperFor } from './shape.js';
@@ -255,7 +255,8 @@ async function probeNerHealth(cfg) {
   const url = nerBaseUrl(cfg);
   if (!url) return { configured: false, ok: false, url: null, model: null };
   try {
-    const r = await fetch(url.replace(/\/ner\/?$/, '') + '/health', { signal: AbortSignal.timeout(2000) });
+    const healthUrl = assertEndpointUrl(url.replace(/\/ner\/?$/, '') + '/health').toString();
+    const r = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) });
     if (!r.ok) return { configured: true, ok: false, url, model: null };
     const j = await r.json().catch(() => ({}));
     return { configured: true, ok: true, url, model: j.model || null };
@@ -425,7 +426,11 @@ async function handleApi(req, res, { adapter, kind, pathname, search, base, dest
       if (destProtocol === 'anthropic') { headers['x-api-key'] = destKey; delete headers.authorization; }
       else { headers.authorization = `Bearer ${destKey}`; }
     }
-    upstream = await fetch(base.replace(/\/$/, '') + pathname + search, {
+    // SSRF guard on the config-supplied upstream: block cloud-metadata + non-http(s)
+    // BEFORE the fetch. Loopback/LAN stay allowed (Ollama/LM Studio/homelab are the
+    // point of a BYO gateway); only the credential-theft pivot is refused.
+    const upstreamUrl = assertEndpointUrl(base.replace(/\/$/, '') + pathname + search).toString();
+    upstream = await fetch(upstreamUrl, {
       method: req.method,
       headers,
       body: ['GET', 'HEAD'].includes(req.method) ? undefined : outBody,
@@ -621,6 +626,7 @@ export function createGateway(cfg = loadConfig()) {
         if (!url) return sendJson(res, 503, { error: { message: 'NER not configured — deterministic-only redaction', type: 'ner_off' } });
         try {
           const body = await readBody(req, cfg.maxBodyBytes);
+          assertEndpointUrl(url); // block metadata/non-http(s) before POSTing raw text to the detector
           const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(8000) });
           const text = await r.text();
           res.writeHead(r.status, { 'content-type': 'application/json' });

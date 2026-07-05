@@ -18,15 +18,39 @@ import os from 'node:os';
 import { join } from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
 import { isKnownModel } from './models.js';
+import { isLoopbackHost, isPrivateHost, isMetadataHost } from '@chatpanel/pii';
 
 const DEFAULT_MODEL = 'Xenova/bert-base-NER';
+const DEFAULT_MODEL_HOST = 'https://dl.chatpanel.net/models/';
 
-// Download models from ChatPanel's own CDN (a branded, edge-cached proxy we
-// control) rather than directly from Hugging Face — so a clean install depends only
-// on chatpanel.net. Override with CHATPANEL_MODEL_BASE_URL (e.g. point at HF for
-// dev, or an air-gapped mirror). Must end with '/' (transformers appends the model
-// path template to it).
-const MODEL_HOST = (process.env.CHATPANEL_MODEL_BASE_URL || 'https://dl.chatpanel.net/models/').replace(/\/*$/, '/');
+// Where model weights are fetched from — ChatPanel's own edge-cached CDN by default,
+// so a clean install depends only on chatpanel.net. CHATPANEL_MODEL_BASE_URL can
+// override it (HF for dev, or an air-gapped LAN mirror) — but that env var is a
+// download-redirect vector: an attacker who sets it could serve a malicious ONNX
+// model into the runtime. So we VALIDATE the override before trusting it: http(s)
+// only, never cloud metadata, and no PLAINTEXT http to a PUBLIC host (a LAN/loopback
+// mirror on http is fine — that's the air-gap case). Anything else falls back to the
+// signed default and logs loudly. (True per-file checksum verification is the
+// remaining H3 step — needs a committed {model→sha256} manifest.)
+export function resolveModelHost() {
+  const raw = process.env.CHATPANEL_MODEL_BASE_URL;
+  if (!raw) return DEFAULT_MODEL_HOST;
+  const fallback = (why) => {
+    console.warn(`[models] ignoring CHATPANEL_MODEL_BASE_URL (${raw}): ${why} — using ${DEFAULT_MODEL_HOST}`);
+    return DEFAULT_MODEL_HOST;
+  };
+  let u;
+  try { u = new URL(raw); } catch { return fallback('not a valid URL'); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return fallback(`scheme ${u.protocol} not allowed`);
+  if (isMetadataHost(u.hostname)) return fallback('points at cloud metadata');
+  const localish = isLoopbackHost(u.hostname) || isPrivateHost(u.hostname);
+  if (u.protocol === 'http:' && !localish) return fallback('plaintext http:// to a public host (use https or a LAN/loopback mirror)');
+  console.warn(`[models] ⚠ model weights will be downloaded from ${u.origin} (CHATPANEL_MODEL_BASE_URL override), not ${DEFAULT_MODEL_HOST}`);
+  return raw.replace(/\/*$/, '/');
+}
+
+// Must end with '/' (transformers appends the model path template to it).
+const MODEL_HOST = resolveModelHost();
 
 let _state = 'off';        // 'off' | 'loading' | 'downloading' | 'ready' | 'error'
 let _model = null;         // active model id, e.g. 'Xenova/bert-base-NER'

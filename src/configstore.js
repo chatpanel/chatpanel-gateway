@@ -2,7 +2,7 @@
 // configure it live over the localhost API (GET/POST /config). The gateway stays
 // authoritative — the extension is just a UI client.
 
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import os from 'node:os';
 import { usage } from './freegate.js';
@@ -15,7 +15,10 @@ export function configPath(env = process.env) {
 
 // Persist the user-editable subset (not derived runtime state).
 export function persistConfig(cfg, path = configPath()) {
-  mkdirSync(dirname(path), { recursive: true });
+  // 0700 the dir + 0600 the file: this JSON holds per-destination apiKeys, the
+  // detector key, and the entitlement/bridge tokens — same secret-at-rest posture
+  // as the history key/secret files, so it isn't left world-readable on a shared host.
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const out = {
     host: cfg.host, port: cfg.port, backend: cfg.backend,
     // Destinations (the configured agents + API models) MUST persist — otherwise a
@@ -25,7 +28,10 @@ export function persistConfig(cfg, path = configPath()) {
     ner: cfg.ner, stt: cfg.stt, allowedOrigins: cfg.allowedOrigins, maxBodyBytes: cfg.maxBodyBytes,
     pro: cfg.pro, logRequests: cfg.logRequests, logDetail: cfg.logDetail, tools: cfg.tools,
   };
-  writeFileSync(path, JSON.stringify(out, null, 2));
+  // mode on writeFileSync only applies when CREATING the file; chmod after covers an
+  // already-existing (pre-fix, possibly 0644) config too. Best-effort for non-POSIX.
+  writeFileSync(path, JSON.stringify(out, null, 2), { mode: 0o600 });
+  try { chmodSync(path, 0o600); } catch { /* platforms without POSIX perms */ }
 }
 
 // Safe view for GET /config — never leak secrets (the entitlement + bridge tokens

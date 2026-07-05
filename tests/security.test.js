@@ -80,3 +80,33 @@ test('non-loopback Host is rejected (anti DNS-rebinding)', async () => {
   assert.equal(r.status, 403);
   gw.close();
 });
+
+// H2 — outbound SSRF: a destination baseUrl pointing at cloud metadata must be
+// refused BEFORE the fetch (credential-theft pivot), while a loopback/LAN model
+// endpoint (Ollama/LM Studio/homelab) stays reachable.
+const apiDest = (baseUrl) => cfg({
+  destinations: [{ id: 'byo', type: 'api', protocol: 'openai', baseUrl, models: ['byo-model'] }],
+});
+const chat = (port, model) => request(port, {
+  method: 'POST', path: '/v1/chat/completions',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }] }),
+});
+
+test('outbound SSRF: metadata baseUrl is refused before fetch', async () => {
+  const gw = createGateway(apiDest('http://169.254.169.254'));
+  const port = await listen(gw);
+  const r = await chat(port, 'byo-model');
+  assert.equal(r.status, 502);
+  assert.match(r.body, /blocked address/); // the guard fired, not a network error
+  gw.close();
+});
+
+test('outbound SSRF: loopback baseUrl is allowed through the guard (Ollama/LM Studio)', async () => {
+  const gw = createGateway(apiDest('http://127.0.0.1:1')); // nothing listening on :1
+  const port = await listen(gw);
+  const r = await chat(port, 'byo-model');
+  assert.equal(r.status, 502);              // fails to CONNECT…
+  assert.doesNotMatch(r.body, /blocked address/); // …but was NOT blocked by the SSRF guard
+  gw.close();
+});
