@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import { existsSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { ensureLib, modelRoot } from './ner-engine.js';
+import { verifyModelWeights } from './model-integrity.js';
 import { DEFAULT_STT_MODEL, isEnglishOnly, sttModelDtype, isKnownSttModel, sttModelEngine } from './stt-models.js';
 import * as parakeet from './parakeet-engine.js';
 import * as diarize from './diarize-engine.js';
@@ -150,6 +151,16 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true, dtype:
       lib.env.remoteHost = 'https://huggingface.co/';
       lib.env.allowRemoteModels = true;
       pipe = await lib.pipeline('automatic-speech-recognition', modelId, { dtype, progress_callback });
+    }
+    // H3: verify freshly-downloaded weights (fail-closed on a real mismatch;
+    // warn-and-allow when unlisted). Post-load — see model-integrity.js note.
+    if (!haveLocal) {
+      try {
+        verifyModelWeights(modelId, { modelsDir: modelRoot(), log });
+      } catch (e) {
+        try { await pipe.dispose?.(); } catch { /* ignore */ }
+        throw e;
+      }
     }
     _pipe = pipe; _model = modelId; _state = 'ready'; _err = null; _progress = null; _dtype = dtype;
     if (prevPipe && prevPipe !== pipe) { try { await prevPipe.dispose?.(); } catch { /* ignore */ } }

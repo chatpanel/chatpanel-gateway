@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
 import { isKnownModel } from './models.js';
 import { isLoopbackHost, isPrivateHost, isMetadataHost } from '@chatpanel/pii';
+import { verifyModelWeights } from './model-integrity.js';
 
 const DEFAULT_MODEL = 'Xenova/bert-base-NER';
 const DEFAULT_MODEL_HOST = 'https://dl.chatpanel.net/models/';
@@ -255,6 +256,20 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true } = {})
       lib.env.remoteHost = 'https://huggingface.co/';
       lib.env.allowRemoteModels = true;
       pipe = await lib.pipeline('token-classification', modelId, { dtype: 'q8', progress_callback });
+    }
+    // H3: verify freshly-downloaded weights against committed hashes before we trust
+    // this pipeline. On a mismatch, dispose it (never use its outputs) and let the
+    // throw fall through to the catch (keeps the previous model / deterministic-only).
+    // NOTE: transformers downloads+loads in one call, so this runs POST-load — it
+    // prevents USING and PERSISTING a tampered model, not a hypothetical ORT
+    // parse-time bug. Warn-and-allow when the model isn't in the hash manifest.
+    if (!haveLocal) {
+      try {
+        verifyModelWeights(modelId, { modelsDir: modelRoot(), log });
+      } catch (e) {
+        try { await pipe.dispose?.(); } catch { /* ignore */ }
+        throw e;
+      }
     }
     // Swap in the new pipeline, dispose the old one (free its WASM/native session).
     _pipe = pipe; _model = modelId; _state = 'ready'; _err = null; _progress = null;
