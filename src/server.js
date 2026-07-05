@@ -45,7 +45,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.30';
+export const VERSION = '0.6.31';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -498,6 +498,18 @@ export function createGateway(cfg = loadConfig()) {
     // CORS for the trusted local UIs (extension/localhost). Preflight ends here.
     if (req.headers.origin) setCors(res, req.headers.origin);
     if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+
+    // Admin-token handshake. The extension authenticates admin routes by its
+    // chrome-extension:// Origin, but Chrome OMITS Origin on GET requests to a host the
+    // extension has permission for — so config READS (GET /config) would fail. A POST
+    // still carries the Origin, so the extension POSTs here (authorized by Origin) to get
+    // the token, then sends it as `Authorization: Bearer` on the GET admin routes. A
+    // drive-by web page can't reach this: its Origin isn't chrome-extension:// (Origin
+    // check) and it has no token. Additive route — old extensions ignore it.
+    if (pathname === '/admin/token' && req.method === 'POST') {
+      if (!isAdminAuthorized(req)) return sendJson(res, 403, { error: 'admin: extension origin or gateway token required' });
+      return sendJson(res, 200, { token: ensureGatewayToken() });
+    }
 
     // M2: ADMIN routes reconfigure the gateway (POST /config) or expose its in-memory
     // logs (GET /logs). Unlike the /v1 data plane (open to any local client — the
