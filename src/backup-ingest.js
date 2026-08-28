@@ -15,7 +15,10 @@ import os from 'node:os';
 import { decryptBackupEnvelope } from './backup-decrypt.js';
 
 const BACKUP_DIR = process.env.CHATPANEL_BACKUP_DIR || join(os.homedir(), 'Downloads', 'ChatPanel Backups');
-const BACKUP_RE = /^chatpanel-backup-[A-Za-z]+\.encrypted\.json$/;
+// Current extension builds scope each weekday slot to a stable per-device id so
+// several machines can share one Drive account without overwriting one another.
+// Keep accepting the seven pre-0.19.4 legacy slots for recovery.
+const BACKUP_RE = /^chatpanel-backup-(?:[a-z0-9]{12,16}-)?(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)\.encrypted\.json$/;
 
 // Newest chatpanel-backup-*.encrypted.json in the backups dir, or null.
 export function findLatestBackup(dir = BACKUP_DIR) {
@@ -31,6 +34,16 @@ export function findLatestBackup(dir = BACKUP_DIR) {
   } catch {
     return null;
   }
+}
+
+export function findBackups(dir = BACKUP_DIR) {
+  try {
+    return readdirSync(dir)
+      .filter((f) => BACKUP_RE.test(f))
+      .map((f) => ({ path: join(dir, f), mtime: statSync(join(dir, f)).mtimeMs }))
+      .sort((a, b) => a.mtime - b.mtime)
+      .map((x) => x.path);
+  } catch { return []; }
 }
 
 // Decrypted backup data → warm records [{ id, text, title, type, date }].
@@ -74,7 +87,7 @@ export function backupToRecords(data) {
 // Decrypt the latest (or given) backup and upsert its records into the store.
 // Returns { ok, ingested, size } or { ok:false, reason }. Never throws on a missing
 // file / passphrase; surfaces a decrypt failure as reason:'decrypt'.
-export async function ingestBackup(store, passphrase, { path } = {}) {
+export async function ingestBackup(store, passphrase, { path = '' } = {}) {
   const file = path || findLatestBackup();
   if (!file || !existsSync(file)) return { ok: false, reason: 'no-backup' };
   if (!passphrase) return { ok: false, reason: 'no-passphrase' };
@@ -87,4 +100,24 @@ export async function ingestBackup(store, passphrase, { path } = {}) {
   const records = backupToRecords(data);
   store.bulk({ upserts: records });
   return { ok: true, file, ingested: records.length, size: store.size };
+}
+
+export async function ingestBackups(store, passphrase, { dir = BACKUP_DIR } = {}) {
+  if (!passphrase) return { ok: false, reason: 'no-passphrase' };
+  const files = findBackups(dir);
+  if (!files.length) return { ok: false, reason: 'no-backup' };
+  const byId = new Map();
+  const accepted = [];
+  const errors = [];
+  for (const file of files) {
+    try {
+      const data = await decryptBackupEnvelope(JSON.parse(readFileSync(file, 'utf8')), passphrase);
+      for (const record of backupToRecords(data)) byId.set(record.id, record);
+      accepted.push(file);
+    } catch (e) { errors.push({ file, error: String(e?.message || e) }); }
+  }
+  if (!accepted.length) return { ok: false, reason: 'decrypt', error: errors[0]?.error || 'no backup matched the stored passphrase' };
+  const records = [...byId.values()];
+  store.bulk({ upserts: records });
+  return { ok: true, file: accepted.at(-1), files: accepted.length, skippedFiles: errors.length, ingested: records.length, size: store.size };
 }

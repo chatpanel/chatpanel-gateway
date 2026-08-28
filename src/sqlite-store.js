@@ -15,7 +15,7 @@
 // via history-store.js's saveBackupSecret.
 
 import { join } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, chmodSync, existsSync } from 'node:fs';
 import os from 'node:os';
 import { HistoryStore } from './history-store.js';
 
@@ -67,11 +67,19 @@ export class SqliteHistoryStore {
   }
 
   async init() {
-    if (this.path !== ':memory:') mkdirSync(DIR, { recursive: true });
+    if (this.path !== ':memory:') {
+      mkdirSync(DIR, { recursive: true, mode: 0o700 });
+      try { chmodSync(DIR, 0o700); } catch { /* non-POSIX */ }
+    }
     this.db = await openDb(this.path);
     this.db.exec('PRAGMA journal_mode=WAL');
     this.db.exec('CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY, title TEXT, type TEXT, date INTEGER, chars INTEGER)');
     this.db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(id UNINDEXED, title, text, tokenize='unicode61')");
+    if (this.path !== ':memory:') {
+      for (const path of [this.path, this.path + '-wal', this.path + '-shm']) {
+        try { if (existsSync(path)) chmodSync(path, 0o600); } catch { /* best effort */ }
+      }
+    }
     return this;
   }
 

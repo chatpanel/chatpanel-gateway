@@ -145,3 +145,14 @@ test('data plane /health stays open to a no-Origin client (not an admin route)',
   assert.equal(r.status, 200);
   gw.close();
 });
+
+test('history key mutation is blocked for a no-Origin local process', async () => {
+  const gw = createGateway(cfg());
+  const port = await listen(gw);
+  const r = await request(port, {
+    method: 'POST', path: '/v1/history/key', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ passphrase: 'must-not-be-accepted' }),
+  });
+  assert.equal(r.status, 403);
+  gw.close();
+});

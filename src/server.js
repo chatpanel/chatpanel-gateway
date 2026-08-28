@@ -30,9 +30,9 @@ import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream,
 import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
 import { installTimestampedConsole } from './log.js';
-import { saveBackupSecret, loadBackupSecret, hasBackupSecret } from './history-store.js';
+import { saveBackupSecret, clearBackupSecret, loadBackupSecret, hasBackupSecret } from './history-store.js';
 import { createHistoryStore } from './sqlite-store.js';
-import { ingestBackup } from './backup-ingest.js';
+import { ingestBackups } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
 import * as sttEngine from './stt-engine.js';
 import * as diarizeEngine from './diarize-engine.js';
@@ -45,7 +45,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.31';
+export const VERSION = '0.6.32';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -518,6 +518,10 @@ export function createGateway(cfg = loadConfig()) {
     if ((pathname === '/config' || pathname === '/logs') && !isAdminAuthorized(req)) {
       return sendJson(res, 403, { error: 'admin route: extension origin or gateway token required' });
     }
+    if ((pathname === '/v1/history/key' || pathname === '/v1/history/ingest-backup')
+      && req.method === 'POST' && !isAdminAuthorized(req)) {
+      return sendJson(res, 403, { error: { message: 'history key route: extension origin or gateway token required', type: 'forbidden' } });
+    }
 
     if (req.method === 'GET' && pathname === '/health') {
       // `stt` is ADDITIVE (Tesla rule): old clients ignore it, new clients use it
@@ -603,19 +607,18 @@ export function createGateway(cfg = loadConfig()) {
     if (pathname === '/v1/history/key' && req.method === 'POST') {
       try {
         const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
-        saveBackupSecret(String(body.passphrase || ''));
-        const result = body.passphrase ? await ingestBackup(historyStore, String(body.passphrase)) : { ok: true, ingested: 0 };
+        if (body.passphrase) saveBackupSecret(String(body.passphrase)); else clearBackupSecret();
+        const result = body.passphrase ? await ingestBackups(historyStore, String(body.passphrase)) : { ok: true, ingested: 0 };
         return sendJson(res, 200, { ok: true, hasKey: !!body.passphrase, ...result });
       } catch (e) {
         return sendJson(res, 400, { error: { message: `key handoff failed: ${e.message}`, type: 'key_error' } });
       }
     }
-    // Trigger a backup-ingest now (uses the stored key). Optional { path } overrides
-    // which backup file to read. Returns how many records were seeded.
+    // Trigger an encrypted archive refresh now using the stored key. Every rotating
+    // weekday snapshot that matches the key contributes records; newest values win.
     if (pathname === '/v1/history/ingest-backup' && req.method === 'POST') {
       try {
-        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes) || '{}').toString('utf8') || '{}') || {};
-        const result = await ingestBackup(historyStore, loadBackupSecret(), { path: body.path });
+        const result = await ingestBackups(historyStore, loadBackupSecret());
         return sendJson(res, result.ok ? 200 : 409, result);
       } catch (e) {
         return sendJson(res, 400, { error: { message: `backup ingest failed: ${e.message}`, type: 'ingest_error' } });
@@ -1019,11 +1022,11 @@ export function start(cfg = loadConfig()) {
       console.error(`⚠ SECURITY: gateway bound to NON-LOOPBACK host ${cfg.host}. It is reachable off-machine, and the loopback Host-header check is spoofable from the LAN. Admin routes still need the token/extension, but prefer binding 127.0.0.1 unless you intend LAN exposure on a trusted network.`);
     }
   });
-  // If the user handed off a backup key, refresh the warm store from the latest
-  // daily backup in the background — so the gateway stays current even when the
+  // If the user handed off a backup key, refresh the warm store from the encrypted
+  // rotating archive in the background — so the gateway stays current even when the
   // extension never runs. Best-effort; never blocks startup or crashes it.
   if (hasBackupSecret()) {
-    ingestBackup(historyStore, loadBackupSecret())
+    ingestBackups(historyStore, loadBackupSecret())
       .then((r) => { if (r?.ok) console.log(`  warm     : seeded ${r.ingested} records from ${r.file}`); })
       .catch(() => {});
   }

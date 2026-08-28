@@ -1,12 +1,12 @@
 // Decrypt a ChatPanel backup envelope — the gateway counterpart to the extension's
 // crypto-backup.js. Same wire format so the gateway can read the user's own daily
 // encrypted backups (with the passphrase they hand off) even when the extension
-// isn't running. WebCrypto (PBKDF2 + AES-GCM) + zlib gunzip; no dependencies.
+// isn't running. WebCrypto (PBKDF2 + AES-GCM) + native zlib codecs; no dependencies.
 //
-// Envelope (v2): { type, version, kdf:{iterations,salt}, cipher:'AES-GCM',
-//   compression:'gzip'|'none'|absent, iv, ct }. v1 (no `compression`) → plaintext.
+// Envelope: { type, version, kdf:{iterations,salt}, cipher:'AES-GCM',
+//   compression:'brotli'|'gzip'|'none'|absent, iv, ct }.
 
-import { gunzipSync } from 'node:zlib';
+import { brotliDecompressSync, gunzipSync } from 'node:zlib';
 
 const ENCRYPTED_TYPE = 'chatpanel-backup-encrypted';
 const b64 = (s) => Buffer.from(String(s || ''), 'base64');
@@ -38,7 +38,8 @@ export async function decryptBackupEnvelope(envelope, passphrase) {
   } catch {
     throw new Error('wrong passphrase, or the backup file is corrupted');
   }
-  // v2 gzips before encrypting; v1 (no `compression` key) is plaintext JSON.
+  // v1 is plaintext, v2 gzip, v3 may use Brotli for a smaller portable file.
   if (envelope.compression === 'gzip') payload = new Uint8Array(gunzipSync(Buffer.from(payload)));
+  else if (envelope.compression === 'brotli') payload = new Uint8Array(brotliDecompressSync(Buffer.from(payload)));
   return JSON.parse(Buffer.from(payload).toString('utf8'));
 }

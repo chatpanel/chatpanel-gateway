@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { gzipSync } from 'node:zlib';
+import { brotliCompressSync, gzipSync } from 'node:zlib';
 import os from 'node:os';
 
 const dir = mkdtempSync(join(os.tmpdir(), 'cp-3b-'));
@@ -13,20 +13,21 @@ process.env.CHATPANEL_HISTORY_KEY = join(dir, 'key');
 process.env.CHATPANEL_HISTORY_SECRET = join(dir, 'secret.enc');
 process.env.CHATPANEL_BACKUP_DIR = dir;
 
-const { HistoryStore, saveBackupSecret, loadBackupSecret, hasBackupSecret } = await import('../src/history-store.js');
+const { HistoryStore, saveBackupSecret, clearBackupSecret, loadBackupSecret, hasBackupSecret } = await import('../src/history-store.js');
 const { decryptBackupEnvelope } = await import('../src/backup-decrypt.js');
-const { ingestBackup, backupToRecords, findLatestBackup } = await import('../src/backup-ingest.js');
+const { ingestBackup, ingestBackups, backupToRecords, findLatestBackup, findBackups } = await import('../src/backup-ingest.js');
 
 // Build an envelope EXACTLY as the extension's encryptBackup does (v2: gzip → AES-GCM).
-async function makeEnvelope(data, passphrase) {
+async function makeEnvelope(data, passphrase, compression = 'gzip') {
   const b64 = (b) => Buffer.from(b).toString('base64');
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
   const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 250000, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
-  const gz = gzipSync(Buffer.from(JSON.stringify(data)));
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, gz));
-  return { type: 'chatpanel-backup-encrypted', version: 2, kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: 250000, salt: b64(salt) }, cipher: 'AES-GCM', compression: 'gzip', iv: b64(iv), ct: b64(ct) };
+  const raw = Buffer.from(JSON.stringify(data));
+  const compressed = compression === 'brotli' ? brotliCompressSync(raw) : gzipSync(raw);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, compressed));
+  return { type: 'chatpanel-backup-encrypted', version: compression === 'brotli' ? 3 : 2, kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: 250000, salt: b64(salt) }, cipher: 'AES-GCM', compression, iv: b64(iv), ct: b64(ct) };
 }
 
 const DATA = {
@@ -78,6 +79,12 @@ test('wrong passphrase throws', async () => {
   await assert.rejects(() => decryptBackupEnvelope(env, 'wrong'), /wrong passphrase/);
 });
 
+test('Brotli extension envelope decrypts for gateway indexing', async () => {
+  const env = await makeEnvelope(DATA, 'portable', 'brotli');
+  const back = await decryptBackupEnvelope(env, 'portable');
+  assert.equal(back.meetings[0].record.title, 'Budget sync');
+});
+
 test('ingestBackup finds the newest file in the backups dir + uses the stored key', async () => {
   const env = await makeEnvelope(DATA, 'pw');
   writeFileSync(join(dir, 'chatpanel-backup-Mon.encrypted.json'), JSON.stringify(env));
@@ -92,6 +99,28 @@ test('ingestBackup finds the newest file in the backups dir + uses the stored ke
   assert.equal(r.ok, true);
   assert.equal(r.ingested, 3);
   assert.equal(store.search('finance')[0].id, 'meeting:imp_9');
+});
+
+test('encrypted snapshot union preserves records absent from the newest backup', async () => {
+  const older = await makeEnvelope(DATA, 'pw');
+  const newer = await makeEnvelope({ ...DATA, conversations: [], meetings: [] }, 'pw');
+  writeFileSync(join(dir, 'chatpanel-backup-Tue.encrypted.json'), JSON.stringify(older));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  writeFileSync(join(dir, 'chatpanel-backup-abcdef1234567890-Wed.encrypted.json'), JSON.stringify(newer));
+  assert.ok(findBackups().some((path) => path.endsWith('chatpanel-backup-abcdef1234567890-Wed.encrypted.json')),
+    'gateway should discover current per-device backup slots');
+  const store = new HistoryStore();
+  const r = await ingestBackups(store, 'pw');
+  assert.equal(r.ok, true);
+  assert.ok(store.get('meeting:imp_9'));
+});
+
+test('clearing the handed-off password removes key state', () => {
+  saveBackupSecret('pw');
+  assert.equal(hasBackupSecret(), true);
+  clearBackupSecret();
+  assert.equal(hasBackupSecret(), false);
+  assert.equal(loadBackupSecret(), '');
 });
 
 test('ingestBackup fails soft with no file / no passphrase', async () => {

@@ -13,7 +13,7 @@
 // tier, not this one. The file on disk is useless without the local key.
 
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import os from 'node:os';
 import { SearchIndex } from './search-index.js';
@@ -57,9 +57,14 @@ function decrypt(key, env) {
 // Kept separate from the records file: it's a credential, not corpus data, and the
 // gateway needs it before the store is even loaded (startup backup-ingest).
 export function saveBackupSecret(passphrase) {
+  if (!String(passphrase || '')) return clearBackupSecret();
   const env = encrypt(loadOrCreateKey(), Buffer.from(String(passphrase || ''), 'utf8'));
   mkdirSync(dirname(SECRET_PATH), { recursive: true });
   writeFileSync(SECRET_PATH, JSON.stringify(env), { mode: 0o600 });
+}
+
+export function clearBackupSecret() {
+  try { if (existsSync(SECRET_PATH)) unlinkSync(SECRET_PATH); } catch { /* best effort */ }
 }
 
 export function loadBackupSecret() {
@@ -72,7 +77,7 @@ export function loadBackupSecret() {
 }
 
 export function hasBackupSecret() {
-  return existsSync(SECRET_PATH);
+  return !!loadBackupSecret();
 }
 
 // Records-plus-index with lazy, debounced encrypted persistence.

@@ -25,6 +25,7 @@ const cfg = (openaiBase) => ({
   redaction: { tier: 'basic', dictionary: [], detection: { backend: 'off' }, redactSystem: true },
   logRequests: false,
 });
+const ADMIN_HEADERS = { Origin: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop' };
 
 test('chat/completions: upstream sees redacted, client gets restored (non-stream)', async () => {
   let seenBody = null;
@@ -215,7 +216,7 @@ async function sendAndGetLog(extra) {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: 'mail alex@example.com' }] }),
   });
-  const logs = await (await fetch(`http://127.0.0.1:${port}/logs`)).json();
+  const logs = await (await fetch(`http://127.0.0.1:${port}/logs`, { headers: ADMIN_HEADERS })).json();
   gw.close(); up.close();
   return logs.entries[0];
 }
@@ -260,7 +261,7 @@ test('streaming: timing splits into model (time-to-first-token) + stream (genera
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ stream: true, messages: [{ role: 'user', content: 'mail alex@example.com' }] }),
   })).text();
-  const logs = await (await fetch(`http://127.0.0.1:${port}/logs`)).json();
+  const logs = await (await fetch(`http://127.0.0.1:${port}/logs`, { headers: ADMIN_HEADERS })).json();
   const e = logs.entries[0];
   for (const stage of ['redact', 'upstream', 'stream', 'total']) {
     assert.equal(typeof e.timings?.[stage], 'number', `streamed request times the ${stage} leg`);
@@ -279,7 +280,7 @@ test('logging OFF: no /logs entries and no timing work (zero added latency)', as
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model: 'x', messages: [{ role: 'user', content: 'mail alex@example.com' }] }),
   });
-  const logs = await (await fetch(`http://127.0.0.1:${port}/logs`)).json();
+  const logs = await (await fetch(`http://127.0.0.1:${port}/logs`, { headers: ADMIN_HEADERS })).json();
   assert.deepEqual(logs.entries, [], 'logRequests:false → nothing recorded, no trace built');
   gw.close(); up.close();
 });
@@ -336,7 +337,7 @@ test('full flow: redact → model → restore tool args → re-redact tool resul
   assert.match(r2.choices[0].message.content, /support@acme\.com/, '② final reply is restored for the user');
 
   // Each leg is timed in the log (async commit already flushed by now).
-  const logs = await (await fetch(`http://127.0.0.1:${port}/logs`)).json();
+  const logs = await (await fetch(`http://127.0.0.1:${port}/logs`, { headers: ADMIN_HEADERS })).json();
   assert.equal(logs.entries.length, 2, 'both turns logged');
   for (const e of logs.entries) {
     for (const stage of ['redact', 'upstream', 'restore', 'total']) {
