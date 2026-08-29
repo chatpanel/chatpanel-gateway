@@ -66,6 +66,17 @@ export function publicConfig(cfg, { proUnlocked = false } = {}) {
   };
 }
 
+// Selecting a bundled NER model is an explicit request to use that detector, not
+// merely to remember its name. Older configs can carry autostart:false; leaving it
+// untouched makes the selected model work only until restart and then silently
+// falls back to deterministic-only redaction.
+export function applyNerModelSelection(cfg, id) {
+  cfg.ner = cfg.ner || { allowDownload: true, enableFullTier: true };
+  cfg.ner.model = id;
+  cfg.ner.autostart = true;
+  return cfg.ner;
+}
+
 // Merge an editable patch into the live cfg. Only known fields; ignores the rest.
 export function applyConfigPatch(cfg, patch = {}) {
   if (patch.backend === 'bridge' || patch.backend === 'api') cfg.backend = patch.backend;

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { persistConfig, applyConfigPatch, publicConfig } from '../src/configstore.js';
+import { persistConfig, applyConfigPatch, applyNerModelSelection, publicConfig } from '../src/configstore.js';
 
 test('persistConfig round-trips DESTINATIONS (a restart must not drop configured agents/APIs)', () => {
   const cfg = {
@@ -44,4 +44,27 @@ test('applyConfigPatch → persistConfig keeps a saved destination across the cy
   } finally {
     rmSync(path, { force: true });
   }
+});
+
+test('selecting an NER model enables autostart and preserves the remaining detector settings', () => {
+  const cfg = {
+    ner: {
+      autostart: false,
+      model: 'old/model',
+      allowDownload: false,
+      enableFullTier: true,
+    },
+  };
+  const selected = applyNerModelSelection(cfg, 'Xenova/bert-base-NER');
+  assert.equal(selected.autostart, true);
+  assert.equal(selected.model, 'Xenova/bert-base-NER');
+  assert.equal(selected.allowDownload, false);
+  assert.equal(selected.enableFullTier, true);
+  assert.equal(cfg.ner, selected);
+
+  const fresh = {};
+  const initial = applyNerModelSelection(fresh, 'Xenova/bert-base-NER');
+  assert.equal(initial.autostart, true);
+  assert.equal(initial.allowDownload, true);
+  assert.equal(initial.enableFullTier, true);
 });

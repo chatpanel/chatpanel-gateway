@@ -39,7 +39,7 @@ import * as diarizeEngine from './diarize-engine.js';
 import { MODEL_CATALOG, isKnownModel, isValidCustomModelId } from './models.js';
 import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MODEL, STT_DTYPES, isValidDtype } from './stt-models.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
-import { publicConfig, applyConfigPatch, persistConfig, configPath } from './configstore.js';
+import { publicConfig, applyConfigPatch, applyNerModelSelection, persistConfig, configPath } from './configstore.js';
 import { resolveDestination, aggregateModelsAsync } from './router.js';
 import * as openai from './openai.js';
 import * as responses from './responses.js';
@@ -687,7 +687,7 @@ export function createGateway(cfg = loadConfig()) {
         if (!id || !(isKnownModel(id) || isValidCustomModelId(id))) return sendJson(res, 400, { error: { message: 'unknown or invalid model id', type: 'bad_model' } });
         // Persist first so a restart keeps the choice, then (re)load. Don't block the
         // response on a possibly-long download — the client polls GET for progress.
-        if (cfg.ner) cfg.ner.model = id; else cfg.ner = { autostart: true, model: id, allowDownload: true, enableFullTier: true };
+        applyNerModelSelection(cfg, id);
         try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
         nerEngine.setModel(id, { onLog: (m) => console.log(m) }).then((ok) => {
           if (ok && cfg.ner?.enableFullTier && cfg.redaction.tier !== 'full') cfg.redaction.tier = 'full';
