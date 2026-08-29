@@ -10,3 +10,6 @@ package-lock.json
 # Agent instructions live ONLY in the private backend repo (docs/agent-guides/).
 CLAUDE.md
 AGENTS.md
+
+# graphify knowledge-graph output (local artifact; embeds absolute $HOME paths)
+graphify-out/
