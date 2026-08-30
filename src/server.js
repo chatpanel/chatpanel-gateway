@@ -45,7 +45,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.37';
+export const VERSION = '0.6.38';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -579,13 +579,13 @@ export function createGateway(cfg = loadConfig()) {
       try {
         const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
         const results = historyStore.search(String(body.query || ''), { limit: Number(body.limit) || 10 });
-        return sendJson(res, 200, { ok: true, size: historyStore.size, results });
+        return sendJson(res, 200, { ok: true, size: historyStore.size, newest: historyStore.newest, results });
       } catch (e) {
         return sendJson(res, 400, { error: { message: `search failed: ${e.message}`, type: 'search_error' } });
       }
     }
     if (pathname === '/v1/history/status' && req.method === 'GET') {
-      return sendJson(res, 200, { ok: true, size: historyStore.size });
+      return sendJson(res, 200, { ok: true, size: historyStore.size, newest: historyStore.newest });
     }
     if (pathname === '/v1/history/list' && req.method === 'GET') {
       const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 50));

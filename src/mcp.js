@@ -61,7 +61,7 @@ async function bridgeJson(path) {
 const TOOLS = [
   {
     name: 'search_history',
-    description: 'Full-text search the user\'s ChatPanel history — past chats, meeting transcripts, and notes — by keyword relevance. Use this to recall what was discussed or written when the current context does not already contain it.',
+    description: 'Full-text search the user\'s ChatPanel history — past chats, meeting transcripts, and notes — by keyword relevance. This is a LOCAL WARM COPY that syncs from ChatPanel; very recent items (a meeting from the last few hours) may not be here yet — every result reports how current the index is. If the user is sure something exists and it is not found, it likely has not synced; say so rather than concluding it does not exist. Meeting titles are often generic ("Zoom Meeting"), so search by CONTENT (topics, names, decisions), not the meeting title.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -82,7 +82,7 @@ const TOOLS = [
   },
   {
     name: 'list_history',
-    description: 'List history records (newest first) with their id, title, type and date — no bodies. Use to browse or page the corpus.',
+    description: 'List history records (newest first) with their id, title, type and date — no bodies. Reports how current this warm copy is (its newest record). Use to see the index horizon and browse/page the corpus.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -119,6 +119,15 @@ const TOOLS = [
   },
 ];
 
+// A one-line freshness banner from the store's newest record, so every answer states the
+// index horizon — the model can then say "not synced yet" instead of "does not exist".
+function horizonLine(newest, size) {
+  if (!newest) return `Index: ${size} records (warm copy synced from ChatPanel).`;
+  const d = new Date(newest);
+  const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return `Index: ${size} records, current through ${iso} (local warm copy — items newer than this may not have synced from ChatPanel yet).`;
+}
+
 async function gatewayJson(path, init) {
   let res;
   try {
@@ -142,8 +151,9 @@ async function callTool(name, args = {}) {
       body: JSON.stringify({ query: String(args.query || ''), limit: Number(args.limit) || 10 }),
     });
     const rows = data.results || [];
-    if (!rows.length) return `No matching history for: ${args.query}`;
-    return [`${rows.length} result(s) for "${args.query}" (of ${data.size} indexed):`, ...rows.map((r, i) => `${i + 1}. [${r.id}] ${r.title || '(untitled)'} · ${r.type}${r.date ? ' · ' + new Date(r.date).toISOString().slice(0, 10) : ''} · score ${r.score?.toFixed?.(3) ?? r.score}`)].join('\n') + '\n\nUse get_record with an id for the full text.';
+    const horizon = horizonLine(data.newest, data.size);
+    if (!rows.length) return `No match for "${args.query}".\n${horizon}\nIf you expected a recent item, it may not have synced yet — check ChatPanel directly, or try broader content keywords (titles are often generic).`;
+    return [horizon, '', `${rows.length} result(s) for "${args.query}":`, ...rows.map((r, i) => `${i + 1}. [${r.id}] ${r.title || '(untitled)'} · ${r.type}${r.date ? ' · ' + new Date(r.date).toISOString().slice(0, 10) : ''} · score ${r.score?.toFixed?.(3) ?? r.score}`)].join('\n') + '\n\nUse get_record with an id for the full text.';
   }
   if (name === 'get_record') {
     const data = await gatewayJson(`/v1/history/get?id=${encodeURIComponent(String(args.id || ''))}`);
@@ -154,8 +164,9 @@ async function callTool(name, args = {}) {
     const q = new URLSearchParams({ limit: String(Number(args.limit) || 50), offset: String(Number(args.offset) || 0) });
     const data = await gatewayJson(`/v1/history/list?${q}`);
     const items = data.items || [];
-    if (!items.length) return 'History is empty (or the gateway has not been seeded yet).';
-    return [`${items.length} of ${data.total} records:`, ...items.map((it) => `[${it.id}] ${it.title || '(untitled)'} · ${it.type}${it.date ? ' · ' + new Date(it.date).toISOString().slice(0, 10) : ''} · ${it.chars} chars`)].join('\n');
+    if (!items.length) return 'History is empty (or the gateway has not been seeded yet — open ChatPanel with warm sync enabled).';
+    const newest = items[0]?.date || null;
+    return [horizonLine(newest, data.total), '', `${items.length} of ${data.total} records:`, ...items.map((it) => `[${it.id}] ${it.title || '(untitled)'} · ${it.type}${it.date ? ' · ' + new Date(it.date).toISOString().slice(0, 10) : ''} · ${it.chars} chars`)].join('\n');
   }
   if (name === 'list_skills') {
     let data;

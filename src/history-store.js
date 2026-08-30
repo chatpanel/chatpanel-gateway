@@ -96,6 +96,14 @@ export class HistoryStore {
     return this.records.size;
   }
 
+  // The timestamp of the freshest record, so a client can tell how current this warm copy
+  // is — the difference between "no such meeting" and "not synced yet".
+  get newest() {
+    let max = 0;
+    for (const r of this.records.values()) if ((r.date || 0) > max) max = r.date || 0;
+    return max || null;
+  }
+
   key() {
     if (!this._key) this._key = loadOrCreateKey();
     return this._key;

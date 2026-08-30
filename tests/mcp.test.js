@@ -58,12 +58,30 @@ test('tools/list returns the three history tools with schemas', async () => {
   for (const t of r.result.tools) assert.equal(t.inputSchema.type, 'object');
 });
 
-test('tools/call search_history formats gateway results', async () => {
-  mockGateway({ 'POST /v1/history/search': { ok: true, size: 12, results: [{ id: 'meeting:2', title: 'Budget', type: 'meeting', date: 0, score: 1.23 }] } });
+test('tools/call search_history formats gateway results, with the freshness horizon', async () => {
+  const newest = new Date(2026, 7, 28, 4, 18).getTime(); // local 2026-08-28 04:18
+  mockGateway({ 'POST /v1/history/search': { ok: true, size: 12, newest, results: [{ id: 'meeting:2', title: 'Budget', type: 'meeting', date: 0, score: 1.23 }] } });
   const r = await handleRpc({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'search_history', arguments: { query: 'budget' } } });
   assert.equal(r.result.isError, undefined);
   assert.match(r.result.content[0].text, /meeting:2/);
   assert.match(r.result.content[0].text, /Budget/);
+  // the horizon is stated so the model can reason about staleness
+  assert.match(r.result.content[0].text, /current through 2026-08-28 04:18/, 'the index horizon (local time) is shown');
+  assert.match(r.result.content[0].text, /may not have synced/i);
+});
+
+test('an empty search steers the model to "not synced yet", not "does not exist"', async () => {
+  mockGateway({ 'POST /v1/history/search': { ok: true, size: 12, newest: Date.now(), results: [] } });
+  const r = await handleRpc({ jsonrpc: '2.0', id: 33, method: 'tools/call', params: { name: 'search_history', arguments: { query: 'nope' } } });
+  assert.match(r.result.content[0].text, /may not have synced/i, 'it must not imply the item does not exist');
+  assert.match(r.result.content[0].text, /check ChatPanel directly/i);
+});
+
+test('the search tool description warns the index is a warm copy that can lag', async () => {
+  const r = await handleRpc({ jsonrpc: '2.0', id: 34, method: 'tools/list' });
+  const search = r.result.tools.find((t) => t.name === 'search_history');
+  assert.match(search.description, /warm copy|not.*synced|may not be here yet/i);
+  assert.match(search.description, /search by CONTENT|generic/i, 'and warns that titles are generic');
 });
 
 test('tools/call get_record returns full text', async () => {
