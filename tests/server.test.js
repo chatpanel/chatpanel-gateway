@@ -347,3 +347,32 @@ test('full flow: redact → model → restore tool args → re-redact tool resul
   }
   gw.close(); up.close();
 });
+
+// Warm-index WRITES must be gated: a drive-by localhost page or random local
+// process must not inject records the model then trusts as the user's history.
+// Reads stay open (that's the product). The extension's POST always carries its
+// Origin, so this does not break it (Tesla rule).
+test('/v1/history/ingest: write requires extension origin/token; read stays open', async () => {
+  const gw = createGateway({ host: '127.0.0.1', port: 0,
+    redaction: { tier: 'basic', detection: { backend: 'off' } }, ner: { autostart: false }, logRequests: false });
+  const port = await listen(gw);
+  const url = `http://127.0.0.1:${port}`;
+  const body = JSON.stringify({ upserts: [{ id: 'x', text: 'secret note', title: 't', type: 'note', date: 1 }] });
+
+  // No Origin, no token → 403, and nothing lands in the index.
+  const denied = await fetch(`${url}/v1/history/ingest`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+  assert.equal(denied.status, 403, 'un-authorized ingest is refused');
+  const empty = await (await fetch(`${url}/v1/history/status`)).json();
+  assert.equal(empty.size, 0, 'refused write did not land');
+
+  // Extension Origin → accepted.
+  const ok = await fetch(`${url}/v1/history/ingest`, { method: 'POST', headers: { 'content-type': 'application/json', ...ADMIN_HEADERS }, body });
+  assert.equal(ok.status, 200, 'ingest with extension origin is accepted');
+  const after = await (await fetch(`${url}/v1/history/status`)).json();
+  assert.equal(after.size, 1, 'authorized write landed');
+
+  // Reads remain open (no Origin needed) — Codex/OpenCode query this directly.
+  const read = await fetch(`${url}/v1/history/search`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: 'secret' }) });
+  assert.equal(read.status, 200, 'search is open to any local client');
+  gw.close();
+});

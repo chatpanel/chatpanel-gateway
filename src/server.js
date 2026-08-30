@@ -522,6 +522,13 @@ export function createGateway(cfg = loadConfig()) {
       && req.method === 'POST' && !isAdminAuthorized(req)) {
       return sendJson(res, 403, { error: { message: 'history key route: extension origin or gateway token required', type: 'forbidden' } });
     }
+    // Reads of the warm index are open (that's the product — Codex/OpenCode query it).
+    // WRITES are not: a drive-by localhost page or a random local process must not be
+    // able to inject records the model then trusts as the user's real history. Ingest
+    // requires the extension Origin (which its POST always carries) or the gateway token.
+    if (pathname === '/v1/history/ingest' && req.method === 'POST' && !isAdminAuthorized(req)) {
+      return sendJson(res, 403, { error: { message: 'history ingest is a write — extension origin or gateway token required', type: 'forbidden' } });
+    }
 
     if (req.method === 'GET' && pathname === '/health') {
       // `stt` is ADDITIVE (Tesla rule): old clients ignore it, new clients use it
