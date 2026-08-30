@@ -4,6 +4,7 @@
 //   chatpanel-gateway              start the gateway (foreground)
 //   chatpanel-gateway mcp          stdio MCP server exposing warm history as tools
 //   chatpanel-gateway local        show the local runtime — bridge + gateway, one view
+//   chatpanel-gateway connect      point your CLI agents (Codex, Claude Code, …) at this server
 //   chatpanel-gateway --install    register login auto-start + start now
 //   chatpanel-gateway --uninstall  remove login auto-start
 //   chatpanel-gateway --status     is auto-start registered?
@@ -24,6 +25,10 @@ try {
     // Read-only unified view of both services. No server.js import — just HTTP probes.
     const { localStatus, formatLocalStatus } = await import('../src/local-status.js');
     process.stdout.write(formatLocalStatus(await localStatus()));
+  } else if (arg === 'connect') {
+    const { connectAgents, formatConnect } = await import('../src/connect-agents.js');
+    const dryRun = process.argv.includes('--dry-run') || process.argv.includes('-n');
+    process.stdout.write(formatConnect(connectAgents({ dryRun }), { dryRun }));
   } else {
     const { start, VERSION } = await import('../src/server.js');
     const { installService, uninstallService, serviceStatus } = await import('../src/service.js');
