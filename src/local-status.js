@@ -42,9 +42,9 @@ async function probe(url, path = '/health') {
  * A structured picture of the local runtime — for the `local` command and for the gateway
  * to log at startup. Pure except the two probes; the caller decides how to render it.
  */
-export async function localStatus() {
-  const gwUrl = gatewayUrl();
-  const brUrl = bridgeUrl();
+export async function localStatus({ gatewayUrl: gwOverride, bridgeUrl: brOverride } = {}) {
+  const gwUrl = gwOverride || gatewayUrl();
+  const brUrl = brOverride || bridgeUrl();
   const [gw, br] = await Promise.all([probe(gwUrl), probe(brUrl)]);
   const skills = br.ok ? await probe(brUrl, '/skills').then((r) => (r.ok ? (r.data.skills || []).length : null)).catch(() => null) : null;
   return {
@@ -94,11 +94,12 @@ export function formatLocalStatus(s) {
  * One-line note for the gateway to log at startup, so the operator sees the unified picture
  * without running anything. Never throws; a probe failure just says "not detected".
  */
-export async function bridgePresenceNote() {
-  const br = await probe(bridgeUrl());
+export async function bridgePresenceNote(brOverride) {
+  const url = brOverride || bridgeUrl();
+  const br = await probe(url);
   if (br.ok) {
     const n = (br.data.skills?.count ?? null);
-    return `bridge detected at ${bridgeUrl()} (v${br.data.version}${n != null ? `, ${n} skills` : ''}) — its agents and skills are available through this gateway.`;
+    return `bridge detected at ${url} (v${br.data.version}${n != null ? `, ${n} skills` : ''}) — its agents and skills are available through this gateway.`;
   }
-  return `bridge not detected at ${bridgeUrl()} — local agents/skills are unavailable until it runs (curl -fsSL https://dl.chatpanel.net/bridge/install.sh | bash). The gateway runs fine without it.`;
+  return `bridge not detected at ${url} — local agents/skills are unavailable until it runs (curl -fsSL https://dl.chatpanel.net/bridge/install.sh | bash). The gateway runs fine without it.`;
 }

@@ -12,7 +12,7 @@
   },
   "scripts": {
     "start": "node bin/chatpanel-gateway.js",
-    "test": "node --test",
+    "test": "node scripts/run-tests.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "build:bin": "bash scripts/build-binaries.sh"
   },

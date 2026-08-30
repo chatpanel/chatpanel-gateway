@@ -22,7 +22,7 @@ test('both running: reports versions, agents, skills, and the routing summary', 
     '4319/skills': { skills: new Array(17).fill({}) },
   });
   try {
-    const s = await localStatus();
+    const s = await localStatus({ gatewayUrl: 'http://127.0.0.1:4320', bridgeUrl: 'http://127.0.0.1:4319' });
     assert.equal(s.gateway.running, true);
     assert.equal(s.bridge.running, true);
     assert.equal(s.bridge.agents, 2);
@@ -38,13 +38,13 @@ test('both running: reports versions, agents, skills, and the routing summary', 
 test('bridge absent reads as optional, not an error', async () => {
   mock({ '4320/health': { version: '0.6.34' }, '4319/health': 'down' });
   try {
-    const s = await localStatus();
+    const s = await localStatus({ gatewayUrl: 'http://127.0.0.1:4320', bridgeUrl: 'http://127.0.0.1:4319' });
     assert.equal(s.bridge.running, false);
     const out = formatLocalStatus(s);
     assert.match(out, /Bridge {2}not running/);
     assert.match(out, /Start the bridge/);
     assert.doesNotMatch(out, /error|✕/i, 'a missing bridge is never an error');
-    const note = await bridgePresenceNote();
+    const note = await bridgePresenceNote('http://127.0.0.1:4319');
     assert.match(note, /not detected/);
     assert.match(note, /runs fine without it/);
   } finally { globalThis.fetch = realFetch; }
@@ -53,7 +53,7 @@ test('bridge absent reads as optional, not an error', async () => {
 test('gateway absent: the command still reports the bridge', async () => {
   mock({ '4320/health': 'down', '4319/health': { version: '0.10.32' } });
   try {
-    const out = formatLocalStatus(await localStatus());
+    const out = formatLocalStatus(await localStatus({ gatewayUrl: 'http://127.0.0.1:4320', bridgeUrl: 'http://127.0.0.1:4319' }));
     assert.match(out, /Gateway {2}not running/);
     assert.match(out, /Bridge {2}running/);
     assert.match(out, /optional upgrade/i);
@@ -63,7 +63,7 @@ test('gateway absent: the command still reports the bridge', async () => {
 test('the startup note names the bridge when present', async () => {
   mock({ '4319/health': { version: '0.10.32', skills: { count: 17 } } });
   try {
-    const note = await bridgePresenceNote();
+    const note = await bridgePresenceNote('http://127.0.0.1:4319');
     assert.match(note, /bridge detected/);
     assert.match(note, /17 skills/);
     assert.match(note, /through this gateway/);
