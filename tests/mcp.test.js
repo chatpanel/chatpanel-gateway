@@ -15,6 +15,34 @@ function mockGateway(routes) {
   };
 }
 
+// The gateway MCP server is the SUPERSET: it also exposes the bridge's skills, proxied.
+// The mock keys off pathname, so a bridge route (/skills…) is caught the same way.
+test('the gateway MCP exposes the bridge skills as a superset', async () => {
+  mockGateway({
+    'GET /skills': { ok: true, skills: [{ id: 'foundry', command: 'microsoft-foundry', description: 'Deploy Foundry agents', origin: { source: 'codex' } }] },
+    'GET /skills/microsoft-foundry': { ok: true, skill: { prompt: 'FULL FOUNDRY INSTRUCTIONS' } },
+    'GET /skills/microsoft-foundry/file/references/auth.md': { ok: true, text: 'auth doc' },
+  });
+  try {
+    const list = await handleRpc({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'list_skills', arguments: {} } });
+    assert.match(list.result.content[0].text, /microsoft-foundry: Deploy Foundry agents \(from codex\)/);
+    const open = await handleRpc({ jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'open_skill', arguments: { name: 'microsoft-foundry' } } });
+    assert.match(open.result.content[0].text, /FULL FOUNDRY INSTRUCTIONS/);
+    const read = await handleRpc({ jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'read_skill_file', arguments: { name: 'microsoft-foundry', path: 'references/auth.md' } } });
+    assert.match(read.result.content[0].text, /auth doc/);
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('skill tools degrade gracefully when the bridge is down', async () => {
+  globalThis.fetch = async () => { throw new Error('ECONNREFUSED'); };
+  try {
+    const list = await handleRpc({ jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'list_skills', arguments: {} } });
+    // A tool RESULT explaining the bridge is unreachable — not a failed connect.
+    assert.match(list.result.content[0].text, /bridge is not reachable/i);
+    assert.ok(!list.error, 'the RPC itself must not error — the connect stays clean');
+  } finally { globalThis.fetch = realFetch; }
+});
+
 test('initialize advertises tools capability', async () => {
   const r = await handleRpc({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
   assert.equal(r.result.serverInfo.name, 'chatpanel-history');
@@ -25,7 +53,7 @@ test('initialize advertises tools capability', async () => {
 test('tools/list returns the three history tools with schemas', async () => {
   const r = await handleRpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const names = r.result.tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['get_record', 'list_history', 'search_history']);
+  assert.deepEqual(names, ['get_record', 'list_history', 'list_skills', 'open_skill', 'read_skill_file', 'search_history']);
   for (const t of r.result.tools) assert.equal(t.inputSchema.type, 'object');
 });
 

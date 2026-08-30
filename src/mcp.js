@@ -7,8 +7,15 @@
 // It PROXIES to the already-running gateway's HTTP API (127.0.0.1:<port>), so there
 // is exactly one warm store (the service's) and this process never opens the DB.
 // JSON-RPC 2.0 over stdio, newline-delimited — implemented directly (zero deps).
+//
+// The gateway is the SUPERSET (docs/bridge-gateway-unification.md, U2): this one MCP
+// server exposes both the gateway's warm history (chats/meetings/notes, redacted) AND the
+// bridge's on-disk skills — so a CLI adds ONE server and gets everything ChatPanel local
+// can do. History tools proxy to the gateway; skill tools proxy to the bridge. The bridge
+// is optional: if it is not running, the skill tools say so instead of failing the connect.
 
 import { loadConfig } from './config.js';
+import { readBridgeToken } from './bridge.js';
 
 const PROTOCOL_VERSION = '2024-11-05';
 const SERVER = { name: 'chatpanel-history', version: '1.0.0' };
@@ -23,6 +30,32 @@ function baseUrl() {
     /* default */
   }
   return `http://127.0.0.1:${port}`;
+}
+
+// The bridge the gateway fronts. Its skills live on disk, so the skill tools proxy here
+// rather than through the gateway's history API.
+function bridgeBase() {
+  try {
+    return String(loadConfig().bridge?.url || 'http://127.0.0.1:4319').replace(/\/+$/, '');
+  } catch {
+    return 'http://127.0.0.1:4319';
+  }
+}
+function bridgeToken() {
+  try {
+    return readBridgeToken(loadConfig().bridge?.token || '');
+  } catch {
+    return readBridgeToken('');
+  }
+}
+async function bridgeJson(path) {
+  const token = bridgeToken();
+  const res = await fetch(bridgeBase() + path, {
+    headers: { Accept: 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) throw new Error(data?.error || `bridge ${res.status}`);
+  return data;
 }
 
 const TOOLS = [
@@ -58,6 +91,32 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: 'list_skills',
+    description: 'List the reusable skills installed on this machine (via the ChatPanel bridge) — across every agent harness (Claude Code, Codex, Copilot, Gemini, Hermes) and any configured folder. Returns each skill\'s name and one-line description. Call open_skill to load the one that fits the task.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'open_skill',
+    description: 'Load one skill\'s full instructions by name (from list_skills), then follow them. If the instructions point at reference files, read one with read_skill_file.',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string', description: 'The skill name from list_skills.' } },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'read_skill_file',
+    description: 'Read one reference file a skill\'s instructions point at (any path inside the skill\'s own folder). Use only when the task needs it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'The skill name.' },
+        path: { type: 'string', description: 'The reference path as written in the instructions, e.g. references/auth.md.' },
+      },
+      required: ['name', 'path'],
+    },
+  },
 ];
 
 async function gatewayJson(path, init) {
@@ -90,6 +149,28 @@ async function callTool(name, args = {}) {
     const items = data.items || [];
     if (!items.length) return 'History is empty (or the gateway has not been seeded yet).';
     return [`${items.length} of ${data.total} records:`, ...items.map((it) => `[${it.id}] ${it.title || '(untitled)'} · ${it.type}${it.date ? ' · ' + new Date(it.date).toISOString().slice(0, 10) : ''} · ${it.chars} chars`)].join('\n');
+  }
+  if (name === 'list_skills') {
+    let data;
+    try { data = await bridgeJson('/skills'); }
+    catch (e) { return `The ChatPanel bridge is not reachable (${e.message}), so installed skills are unavailable. Start it to use skills.`; }
+    const rows = data.skills || [];
+    if (!rows.length) return 'No skills installed on this machine yet.';
+    return [`${rows.length} skill(s) installed:`, ...rows.map((r) => `- ${r.command || r.id}: ${r.description || r.name}${r.origin?.source ? ` (from ${r.origin.source})` : ''}`)].join('\n') + '\n\nUse open_skill with a name to load its instructions.';
+  }
+  if (name === 'open_skill') {
+    let data;
+    try { data = await bridgeJson(`/skills/${encodeURIComponent(String(args.name || '').trim())}`); }
+    catch (e) { return `Could not open "${args.name}": ${e.message}`; }
+    return data.skill?.prompt || '(this skill has no extra instructions — just apply it.)';
+  }
+  if (name === 'read_skill_file') {
+    const skill = encodeURIComponent(String(args.name || '').trim());
+    const path = String(args.path || '').trim().split('/').map(encodeURIComponent).join('/');
+    let data;
+    try { data = await bridgeJson(`/skills/${skill}/file/${path}`); }
+    catch (e) { return `Could not read ${args.path}: ${e.message}`; }
+    return data.text || '(empty)';
   }
   throw new Error(`unknown tool: ${name}`);
 }
