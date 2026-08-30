@@ -120,9 +120,16 @@ const TOOLS = [
 ];
 
 async function gatewayJson(path, init) {
-  const res = await fetch(baseUrl() + path, init);
+  let res;
+  try {
+    res = await fetch(baseUrl() + path, init);
+  } catch (e) {
+    // The most common cause by far: the gateway service is not running. Say so, and how to
+    // fix it, so the agent can relay something actionable instead of a bare fetch error.
+    throw new Error(`the ChatPanel gateway is not running at ${baseUrl()} — start it with "chatpanel-gateway --install" (or run "chatpanel-gateway"), then retry. [${e.message}]`);
+  }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error?.message || `gateway ${res.status}`);
+  if (!res.ok) throw new Error(data?.error?.message || `the gateway returned HTTP ${res.status} for ${path}`);
   return data;
 }
 
@@ -153,7 +160,7 @@ async function callTool(name, args = {}) {
   if (name === 'list_skills') {
     let data;
     try { data = await bridgeJson('/skills'); }
-    catch (e) { return `The ChatPanel bridge is not reachable (${e.message}), so installed skills are unavailable. Start it to use skills.`; }
+    catch (e) { return `Installed skills are unavailable because the ChatPanel bridge is not running at ${bridgeBase()}. Install/start it with:\n    curl -fsSL https://dl.chatpanel.net/bridge/install.sh | bash\nThen retry. History tools work without the bridge. [${e.message}]`; }
     const rows = data.skills || [];
     if (!rows.length) return 'No skills installed on this machine yet.';
     return [`${rows.length} skill(s) installed:`, ...rows.map((r) => `- ${r.command || r.id}: ${r.description || r.name}${r.origin?.source ? ` (from ${r.origin.source})` : ''}`)].join('\n') + '\n\nUse open_skill with a name to load its instructions.';
@@ -161,7 +168,7 @@ async function callTool(name, args = {}) {
   if (name === 'open_skill') {
     let data;
     try { data = await bridgeJson(`/skills/${encodeURIComponent(String(args.name || '').trim())}`); }
-    catch (e) { return `Could not open "${args.name}": ${e.message}`; }
+    catch (e) { return `Could not open "${args.name}": ${e.message}. If the bridge isn't running, start it: curl -fsSL https://dl.chatpanel.net/bridge/install.sh | bash`; }
     return data.skill?.prompt || '(this skill has no extra instructions — just apply it.)';
   }
   if (name === 'read_skill_file') {
@@ -169,7 +176,7 @@ async function callTool(name, args = {}) {
     const path = String(args.path || '').trim().split('/').map(encodeURIComponent).join('/');
     let data;
     try { data = await bridgeJson(`/skills/${skill}/file/${path}`); }
-    catch (e) { return `Could not read ${args.path}: ${e.message}`; }
+    catch (e) { return `Could not read ${args.path}: ${e.message}. If the bridge isn't running, start it: curl -fsSL https://dl.chatpanel.net/bridge/install.sh | bash`; }
     return data.text || '(empty)';
   }
   throw new Error(`unknown tool: ${name}`);

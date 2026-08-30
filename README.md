@@ -172,6 +172,62 @@ Streaming (SSE) is supported on all three: placeholders are restored on the fly,
 holding back a tail so a token split across chunks (`[[PER` … `SON_1]]`) still
 restores cleanly.
 
+## Use it as an MCP server (Codex, Claude Code, any MCP client)
+
+Point one MCP server at the gateway and any CLI agent can reach your **local history**
+(past chats, meeting transcripts, notes — redacted on the way out) **and every skill
+installed on your machine** — across Claude Code, Codex, Copilot, Gemini, Hermes,
+`~/.agents/skills` and any folder you configure. History is served by the gateway; skills
+are proxied from the [bridge](https://github.com/chatpanel/chatpanel-bridge) (optional — if
+it is not running, the history tools still work and the skill tools say so).
+
+It is a stdio MCP server: `chatpanel-gateway mcp`.
+
+**Codex** — add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.chatpanel]
+command = "chatpanel-gateway"
+args = ["mcp"]
+```
+
+**Claude Code** — one command (`--scope user` makes it available in every project):
+
+```bash
+claude mcp add --scope user chatpanel chatpanel-gateway mcp
+```
+
+**Any other MCP client** — run the stdio server `chatpanel-gateway mcp`, or point at it the
+way your client configures a `command` + `args` stdio server.
+
+> If your client launches with a stripped `PATH` and cannot find `chatpanel-gateway`, use
+> the absolute path (find it with `which chatpanel-gateway`).
+
+### Tools it exposes
+
+| Tool | What it does |
+|------|--------------|
+| `search_history` | Full-text search your chats, meetings and notes by relevance |
+| `get_record` | Fetch one record's full text by id (`chat:…`, `meeting:…`, `note:…`) |
+| `list_history` | Browse/page the corpus (newest first, no bodies) |
+| `list_skills` | List every installed skill (name + one-line description, and where it came from) |
+| `open_skill` | Load one skill's full instructions by name |
+| `read_skill_file` | Read a reference file a skill's instructions point at |
+
+Everything a history tool returns is **redacted** with the same engine
+([`@chatpanel/pii`](https://github.com/chatpanel/chatpanel-pii)) the gateway uses for model
+traffic — the real values never leave your device. Skill scripts are never served as text.
+
+### One local view
+
+```bash
+chatpanel-gateway local
+```
+
+prints what is running — the gateway (this) and the bridge (your agents + skills) — so you
+can see the whole local runtime at a glance. The bridge is an optional companion; a missing
+one is reported plainly, never as an error.
+
 ## How it fits with ChatPanel
 
 The [extension](https://github.com/chatpanel/chatpanel-extension) redacts inside
@@ -191,6 +247,22 @@ agent's own multi-turn loop is blinded, not just the first prompt.
 - **Code edits**: redacting values that appear inside source can affect round-trip
   edits. The default tier touches only structured secrets and (in `full`) detected
   entities — keep your dictionary prose-focused.
+
+**Using it as an MCP server:**
+
+- The **gateway must be running** for any of its tools to work — it is a background
+  service (`chatpanel-gateway --install` registers it to start at login). If a tool
+  returns *"the ChatPanel gateway is not running"*, start it and retry; the message tells
+  you the command.
+- **Skills need the bridge** (an optional companion). Without it, the history tools still
+  work and the skill tools return a one-line *"the bridge is not running — install it
+  with …"* — no silent empty result.
+- History tools search the gateway's **warm store**, which is seeded from your ChatPanel
+  backups. If `list_history` says it is empty, the gateway has not been seeded yet — open
+  ChatPanel so a backup lands, or check the [ingest docs](#endpoints).
+- Everything returned is **redacted** at the configured tier. A tool result may contain a
+  placeholder like `[[EMAIL_1]]` where a value was blinded — that is the privacy guarantee
+  working, not a bug.
 
 ## License
 

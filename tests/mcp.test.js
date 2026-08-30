@@ -38,7 +38,8 @@ test('skill tools degrade gracefully when the bridge is down', async () => {
   try {
     const list = await handleRpc({ jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'list_skills', arguments: {} } });
     // A tool RESULT explaining the bridge is unreachable — not a failed connect.
-    assert.match(list.result.content[0].text, /bridge is not reachable/i);
+    assert.match(list.result.content[0].text, /bridge is not running/i);
+    assert.match(list.result.content[0].text, /install\.sh \| bash/, 'and tells the user how to fix it');
     assert.ok(!list.error, 'the RPC itself must not error — the connect stays clean');
   } finally { globalThis.fetch = realFetch; }
 });
