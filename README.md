@@ -191,6 +191,29 @@ command = "chatpanel-gateway"
 args = ["mcp"]
 ```
 
+> **Corporate Codex with an approval guardian?** If a tool call is rejected with
+> *"Automatic approval review failed"* (an `approvals_reviewer = "auto_review"` policy
+> can't assess a tool it doesn't know), pre-approve ChatPanel's read-only tools the same
+> way you would any other server — one block per tool:
+>
+> ```toml
+> [mcp_servers.chatpanel.tools.search_history]
+> approval_mode = "approve"
+> [mcp_servers.chatpanel.tools.get_record]
+> approval_mode = "approve"
+> [mcp_servers.chatpanel.tools.list_history]
+> approval_mode = "approve"
+> [mcp_servers.chatpanel.tools.list_skills]
+> approval_mode = "approve"
+> [mcp_servers.chatpanel.tools.open_skill]
+> approval_mode = "approve"
+> [mcp_servers.chatpanel.tools.read_skill_file]
+> approval_mode = "approve"
+> ```
+>
+> All six only read local data (your redacted history and your installed skills), so
+> approving them carries no write or network risk.
+
 **Claude Code** — one command (`--scope user` makes it available in every project):
 
 ```bash
