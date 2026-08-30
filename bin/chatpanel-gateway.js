@@ -3,6 +3,7 @@
 //
 //   chatpanel-gateway              start the gateway (foreground)
 //   chatpanel-gateway mcp          stdio MCP server exposing warm history as tools
+//   chatpanel-gateway local        show the local runtime — bridge + gateway, one view
 //   chatpanel-gateway --install    register login auto-start + start now
 //   chatpanel-gateway --uninstall  remove login auto-start
 //   chatpanel-gateway --status     is auto-start registered?
@@ -19,6 +20,10 @@ try {
     // server.js (which would open a second handle on the warm SQLite store).
     const { runMcpServer } = await import('../src/mcp.js');
     await runMcpServer();
+  } else if (arg === 'local') {
+    // Read-only unified view of both services. No server.js import — just HTTP probes.
+    const { localStatus, formatLocalStatus } = await import('../src/local-status.js');
+    process.stdout.write(formatLocalStatus(await localStatus()));
   } else {
     const { start, VERSION } = await import('../src/server.js');
     const { installService, uninstallService, serviceStatus } = await import('../src/service.js');

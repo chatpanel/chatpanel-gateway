@@ -1013,6 +1013,13 @@ export function start(cfg = loadConfig()) {
   server.listen(cfg.port, cfg.host, () => {
     console.log(`ChatPanel Privacy Gateway v${VERSION} on http://${cfg.host}:${cfg.port}`);
     console.log(`  backend  : ${cfg.backend}` + (cfg.backend === 'bridge' ? ` (agent: ${cfg.bridge.agent}, via ${cfg.bridge.url})` : ''));
+    // U3: report the bridge at startup so the operator sees the unified picture without
+    // running anything. Detect only — never force-spawn a managed service. Best-effort and
+    // non-fatal: a probe failure just logs "not detected".
+    import('./local-status.js')
+      .then((m) => m.bridgePresenceNote())
+      .then((note) => console.log(`  bridge   : ${note}`))
+      .catch(() => {});
     console.log(`  redaction: ${cfg.redaction.tier}` + (cfg.redaction.detection?.backend && cfg.redaction.detection.backend !== 'off'
       ? ` + ${cfg.redaction.detection.backend} detector` : (cfg.ner?.autostart ? ' (+ NER starting…)' : '')));
     // M7: a non-loopback bind exposes the gateway on the LAN, where the per-request
