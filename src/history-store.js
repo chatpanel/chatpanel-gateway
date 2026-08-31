@@ -187,8 +187,32 @@ export class HistoryStore {
     return n;
   }
 
-  search(query, opts) {
-    return this.index.search(query, opts);
+  // Mirror the SQLite engine's richer contract so both backends behave the same: type/date
+  // filters, offset paging, and a matching snippet (over-fetch from the ranker, then filter
+  // and page, since SearchIndex has no WHERE clause).
+  search(query, { limit = 10, offset = 0, type = null, since = null, before = null } = {}) {
+    const raw = this.index.search(query, { limit: (limit + offset) * 3 + 20 });
+    const out = [];
+    for (const r of raw) {
+      const rec = this.records.get(r.id);
+      if (!rec) continue;
+      if (type && rec.type !== type) continue;
+      if (since != null && (rec.date || 0) < since) continue;
+      if (before != null && (rec.date || 0) > before) continue;
+      out.push({ id: r.id, score: r.score, title: rec.title, type: rec.type, date: rec.date, snippet: snippetOf(rec.text, query) });
+    }
+    return out.slice(offset, offset + limit);
+  }
+
+  // Graph navigation — records most connected to this one, by shared content.
+  related(id, { limit = 5 } = {}) {
+    const rec = this.records.get(id);
+    if (!rec) return [];
+    const raw = this.index.search(`${rec.title || ''} ${String(rec.text || '').slice(0, 2000)}`, { limit: limit + 5 });
+    return raw.filter((r) => r.id !== id).slice(0, limit).map((r) => {
+      const m = this.records.get(r.id) || {};
+      return { id: r.id, score: r.score, title: m.title, type: m.type, date: m.date };
+    });
   }
 
   // Metadata list for an external UI, newest first, paginated. No bodies.
@@ -199,7 +223,28 @@ export class HistoryStore {
     return { total: all.length, items: all.slice(offset, offset + limit) };
   }
 
-  get(id) {
-    return this.records.get(id) || null;
+  // Paged fetch for token management (maxChars/offset), matching SqliteHistoryStore.get.
+  get(id, { maxChars = null, offset = 0 } = {}) {
+    const rec = this.records.get(id);
+    if (!rec) return null;
+    const full = String(rec.text || '');
+    let text = offset ? full.slice(offset) : full;
+    let truncated = false;
+    if (maxChars && text.length > maxChars) { text = text.slice(0, maxChars); truncated = true; }
+    return { ...rec, text, totalChars: full.length, offset: Number(offset) || 0, truncated };
   }
+}
+
+// A short excerpt of `text` around the first query-term hit — the token-friendly preview a
+// search returns instead of the whole body. Falls back to the head when no term matches.
+function snippetOf(text, query, radius = 90) {
+  const s = String(text || '');
+  if (!s) return '';
+  const terms = String(query || '').toLowerCase().match(/[a-z0-9][a-z0-9'_+-]*/g) || [];
+  const lower = s.toLowerCase();
+  let idx = -1;
+  for (const t of terms) { const i = lower.indexOf(t); if (i >= 0 && (idx < 0 || i < idx)) idx = i; }
+  if (idx < 0) return s.slice(0, radius * 2).replace(/\s+/g, ' ').trim();
+  const start = Math.max(0, idx - radius);
+  return `${start > 0 ? '… ' : ''}${s.slice(start, idx + radius).replace(/\s+/g, ' ').trim()}${idx + radius < s.length ? ' …' : ''}`;
 }

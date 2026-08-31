@@ -26,18 +26,22 @@ const SERVER = { name: 'chatpanel-history', version: '1.0.0' };
 // have to say "use ChatPanel": it tells the model that the user's personal meetings/notes/
 // chats live here and must be reached through these tools, not by grepping the working dir.
 const INSTRUCTIONS = [
-  'ChatPanel holds the USER\'S OWN meetings, notes and past chats (transcripts, decisions,',
-  'action items, summaries). It is the source of truth for anything personal/organizational —',
-  'NOT the code in the working directory.',
+  'ChatPanel holds the USER\'S OWN meetings, notes and past chats — transcripts, decisions,',
+  'action items, summaries — which usually are NOT in the working directory.',
   '',
-  'When the user asks about a meeting, a call, a demo, notes, a past conversation, "what did',
-  'we decide", "the outcome of…", "action items", "what did X say", or anything scoped to a',
-  'day/person/topic in THEIR history — call search_history FIRST (search by content, not the',
-  'meeting title), then get_record for the full text. Do NOT grep the working directory, git',
-  'history, README or MEMORY files for the user\'s personal meeting/chat content — it is not',
-  'there; it is in ChatPanel. list_skills/open_skill expose the user\'s installed skills the',
-  'same way. Every result states how fresh the local copy is; if something recent is missing,',
-  'it may not have synced yet — say so rather than concluding it does not exist.',
+  'Keep using all your normal tools. ADDITIONALLY, whenever the user\'s question touches a',
+  'meeting, call, demo, note, or past conversation ("outcome of the meeting", "what did we',
+  'decide", "action items", "notes from yesterday", a person/day/topic in their history),',
+  'ALSO consult ChatPanel — it is the source of truth for that personal history:',
+  '  • search_history — search by CONTENT (not the generic meeting title). Supports filters:',
+  '    type (chat|meeting|note), since/before (dates or relative like "7d", "yesterday"),',
+  '    and limit/offset paging. Returns compact snippets, not full bodies.',
+  '  • get_record — the full text of one result id; use maxChars/offset to page a long',
+  '    transcript instead of pulling it all into context.',
+  '  • find_related — follow the graph: given a record id, the records most connected to it.',
+  'Prefer these for the user\'s history and combine them with your other tools as you see fit.',
+  'Every result states how fresh the local copy is; if something recent is missing it may not',
+  'have synced yet — say so rather than concluding it does not exist.',
 ].join('\n');
 
 // The calling agent's self-reported name (from MCP `initialize` clientInfo), so the
@@ -101,22 +105,42 @@ async function bridgeJson(path) {
 const TOOLS = [
   {
     name: 'search_history',
-    description: 'Search the user\'s ChatPanel history — their past chats, meeting/call transcripts, and notes — by keyword relevance. USE THIS FIRST, without being asked, whenever the user\'s question is about a meeting, call, demo, standup, note, or past conversation: "outcome of the meeting", "what did we decide/agree", "action items", "what did <person> say", "notes from yesterday/last week", a topic or person scoped to their history. That content lives ONLY in ChatPanel — do NOT grep the working directory, git history, README, or MEMORY files for it; it is not there. This is a LOCAL WARM COPY that syncs from ChatPanel; very recent items (a meeting from the last few hours) may not be here yet — every result reports how current the index is, so if something is missing it likely has not synced (say so rather than concluding it does not exist). Meeting titles are often generic ("Zoom Meeting"), so search by CONTENT (topics, names, decisions), not the title. Then call get_record with a returned id for the full text.',
+    description: 'Search the user\'s ChatPanel history — their past chats, meeting/call transcripts, and notes — by keyword relevance. Consult this (in ADDITION to your other tools) whenever the question touches a meeting, call, demo, note, or past conversation: "outcome of the meeting", "what did we decide", "action items", "what did <person> say", "notes from yesterday". Filters: `type` (chat|meeting|note), `since`/`before` (a date like 2026-08-01 or a relative window like "7d"/"yesterday"), and `limit`/`offset` for paging. Returns compact SNIPPETS (the matching excerpt) with each record\'s id/title/type/date — token-friendly; call get_record for the full text and find_related to follow connections. This is a LOCAL WARM COPY that syncs from ChatPanel; very recent items may not be here yet — results report how current the index is, so if something is missing it likely has not synced. Meeting titles are often generic ("Zoom Meeting"), so search by CONTENT, not the title.',
     inputSchema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Natural-language / keyword query.' },
+        query: { type: 'string', description: 'Content keywords (topics, names, decisions) — not the meeting title.' },
+        type: { type: 'string', enum: ['chat', 'meeting', 'note'], description: 'Only this kind of record.' },
+        since: { type: 'string', description: 'Earliest date: 2026-08-01, or a relative window like "7d", "2 weeks", "yesterday".' },
+        before: { type: 'string', description: 'Latest date: a date or relative window like `since`.' },
         limit: { type: 'number', description: 'Max results (default 10).' },
+        offset: { type: 'number', description: 'Skip N results for paging (default 0).' },
       },
       required: ['query'],
     },
   },
   {
     name: 'get_record',
-    description: 'Fetch one full history record (its complete text) by id, e.g. chat:<id>, meeting:<id>, or note:<id> returned by search_history.',
+    description: 'Fetch one history record\'s full text by id (chat:<id>, meeting:<id>, note:<id> from search_history). For a long transcript, page it with maxChars + offset instead of pulling it all into context — the result says how many chars remain.',
     inputSchema: {
       type: 'object',
-      properties: { id: { type: 'string', description: 'Record id such as chat:abc, meeting:imp_123, or note:xyz.' } },
+      properties: {
+        id: { type: 'string', description: 'Record id such as chat:abc, meeting:imp_123, or note:xyz.' },
+        maxChars: { type: 'number', description: 'Return at most this many characters (token management for long transcripts).' },
+        offset: { type: 'number', description: 'Start at this character offset — page through with the offset the previous call reports.' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'find_related',
+    description: 'Graph navigation: given a record id (from search_history), return the records most connected to it by shared content — the meetings/notes/chats about the same topic, people or thread. Use it to expand from one hit to the surrounding context instead of re-searching.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The record id to find neighbours of.' },
+        limit: { type: 'number', description: 'Max related records (default 5).' },
+      },
       required: ['id'],
     },
   },
@@ -183,22 +207,62 @@ async function gatewayJson(path, init) {
 }
 
 // Run a tool → a plain-text result an agent can read.
+// Parse a since/before value into epoch ms: an ISO-ish date (2026-08-01) or a relative window
+// meaning "within the last N" — "7d", "2 weeks", "3 months", "yesterday", "today".
+function parseWhen(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return v;
+  const s = String(v).trim().toLowerCase();
+  const DAY = 86_400_000;
+  if (s === 'today') return Date.now() - DAY;
+  if (s === 'yesterday') return Date.now() - 2 * DAY;
+  const rel = /^(\d+)\s*(d|day|days|w|week|weeks|m|month|months|y|year|years)$/.exec(s);
+  if (rel) {
+    const n = Number(rel[1]);
+    const u = rel[2][0];
+    const mult = u === 'd' ? DAY : u === 'w' ? 7 * DAY : u === 'm' ? 30 * DAY : 365 * DAY;
+    return Date.now() - n * mult;
+  }
+  const t = Date.parse(s);
+  return Number.isNaN(t) ? null : t;
+}
+
+const fmtRow = (r, i) => `${i + 1}. [${r.id}] ${r.title || '(untitled)'} · ${r.type}${r.date ? ' · ' + new Date(r.date).toISOString().slice(0, 10) : ''}${r.snippet ? `\n     ${r.snippet}` : ''}`;
+
 async function callTool(name, args = {}) {
   if (name === 'search_history') {
+    const body = { query: String(args.query || ''), limit: Number(args.limit) || 10, offset: Math.max(0, Number(args.offset) || 0) };
+    if (args.type) body.type = String(args.type);
+    const since = parseWhen(args.since); if (since != null) body.since = since;
+    const before = parseWhen(args.before); if (before != null) body.before = before;
     const data = await gatewayJson('/v1/history/search', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ query: String(args.query || ''), limit: Number(args.limit) || 10 }),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     });
     const rows = data.results || [];
     const horizon = horizonLine(data.newest, data.size);
-    if (!rows.length) return `No match for "${args.query}".\n${horizon}\nIf you expected a recent item, it may not have synced yet — check ChatPanel directly, or try broader content keywords (titles are often generic).`;
-    return [horizon, '', `${rows.length} result(s) for "${args.query}":`, ...rows.map((r, i) => `${i + 1}. [${r.id}] ${r.title || '(untitled)'} · ${r.type}${r.date ? ' · ' + new Date(r.date).toISOString().slice(0, 10) : ''} · score ${r.score?.toFixed?.(3) ?? r.score}`)].join('\n') + '\n\nUse get_record with an id for the full text.';
+    const filt = [args.type && `type=${args.type}`, args.since && `since=${args.since}`, args.before && `before=${args.before}`].filter(Boolean).join(', ');
+    const tag = filt ? ` (${filt})` : '';
+    if (!rows.length) return `No match for "${args.query}"${tag}.\n${horizon}\nIf you expected a recent item, it may not have synced yet — check ChatPanel directly, or broaden the query (titles are often generic; try content keywords, or drop a filter).`;
+    return [horizon, '', `${rows.length} result(s) for "${args.query}"${tag}:`, ...rows.map(fmtRow)].join('\n')
+      + '\n\nget_record <id> for full text (maxChars/offset to page) · find_related <id> to follow connections.';
   }
   if (name === 'get_record') {
-    const data = await gatewayJson(`/v1/history/get?id=${encodeURIComponent(String(args.id || ''))}`);
+    const q = new URLSearchParams({ id: String(args.id || '') });
+    if (args.maxChars != null) q.set('maxChars', String(Math.max(1, Number(args.maxChars) || 0)));
+    if (args.offset != null) q.set('offset', String(Math.max(0, Number(args.offset) || 0)));
+    const data = await gatewayJson(`/v1/history/get?${q}`);
     const r = data.record;
-    return `[${r.id}] ${r.title || '(untitled)'} · ${r.type}${r.date ? ' · ' + new Date(r.date).toISOString().slice(0, 10) : ''}\n\n${r.text || '(empty)'}`;
+    const head = `[${r.id}] ${r.title || '(untitled)'} · ${r.type}${r.date ? ' · ' + new Date(r.date).toISOString().slice(0, 10) : ''}`;
+    const more = r.truncated
+      ? `\n\n[showing ${r.text.length} of ${r.totalChars} chars (from offset ${r.offset}). For the next part call get_record again with offset=${r.offset + r.text.length}.]`
+      : '';
+    return `${head}\n\n${r.text || '(empty)'}${more}`;
+  }
+  if (name === 'find_related') {
+    const data = await gatewayJson(`/v1/history/related?id=${encodeURIComponent(String(args.id || ''))}&limit=${Number(args.limit) || 5}`);
+    const rows = data.results || [];
+    if (!rows.length) return `Nothing related to ${args.id} found (or that id isn't in the warm index — run search_history first to get a valid id).`;
+    return [`Records related to ${args.id}:`, ...rows.map(fmtRow)].join('\n') + '\n\nget_record <id> for full text.';
   }
   if (name === 'list_history') {
     const q = new URLSearchParams({ limit: String(Number(args.limit) || 50), offset: String(Number(args.offset) || 0) });

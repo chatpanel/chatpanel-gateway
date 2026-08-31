@@ -130,13 +130,44 @@ export class SqliteHistoryStore {
     return this.size;
   }
 
-  // [{ id, score, title, type, date }] — score higher = better (bm25 is negated).
-  search(query, { limit = 10 } = {}) {
+  // [{ id, score, title, type, date, snippet }] — score higher = better (bm25 is negated).
+  // Filters: type (chat|meeting|note), since/before (epoch ms bounds), offset (paging).
+  // `snippet` returns the matching excerpt from the transcript/body so a caller can rank and
+  // decide what to fetch WITHOUT pulling full bodies — the token-management path.
+  search(query, { limit = 10, offset = 0, type = null, since = null, before = null } = {}) {
     const match = ftsMatch(query);
     if (!match) return [];
+    const where = ['fts MATCH ?'];
+    const params = [match];
+    if (type) { where.push('r.type = ?'); params.push(String(type)); }
+    if (since != null) { where.push('r.date >= ?'); params.push(Number(since)); }
+    if (before != null) { where.push('r.date <= ?'); params.push(Number(before)); }
+    params.push(limit, offset);
     const rows = this.db.all(
-      'SELECT r.id id, r.title title, r.type type, r.date date, bm25(fts) b FROM fts JOIN records r ON r.id = fts.id WHERE fts MATCH ? ORDER BY b LIMIT ?',
-      [match, limit],
+      `SELECT r.id id, r.title title, r.type type, r.date date, bm25(fts) b,
+              snippet(fts, 2, '«', '»', ' … ', 12) snip
+       FROM fts JOIN records r ON r.id = fts.id
+       WHERE ${where.join(' AND ')} ORDER BY b LIMIT ? OFFSET ?`,
+      params,
+    );
+    return rows.map((r) => ({ id: r.id, score: -r.b, title: r.title, type: r.type, date: r.date, snippet: r.snip || '' }));
+  }
+
+  // Graph navigation — records most connected to a given one, by shared content. "More like
+  // this": build a MATCH from the record's title + a sample of its body, rank by bm25, drop
+  // self. Cheap and index-only; no embeddings needed for a first-class "related" primitive.
+  related(id, { limit = 5 } = {}) {
+    const rec = this.get(id);
+    if (!rec) return [];
+    const terms = ftsMatch(`${rec.title || ''} ${String(rec.text || '').slice(0, 2000)}`);
+    if (!terms) return [];
+    // Cap the OR-set so a long transcript doesn't build a giant MATCH.
+    const capped = terms.split(' OR ').slice(0, 40).join(' OR ');
+    const rows = this.db.all(
+      `SELECT r.id id, r.title title, r.type type, r.date date, bm25(fts) b
+       FROM fts JOIN records r ON r.id = fts.id
+       WHERE fts MATCH ? AND r.id != ? ORDER BY b LIMIT ?`,
+      [capped, id, limit],
     );
     return rows.map((r) => ({ id: r.id, score: -r.b, title: r.title, type: r.type, date: r.date }));
   }
@@ -147,11 +178,17 @@ export class SqliteHistoryStore {
     return { total, items };
   }
 
-  get(id) {
+  // Paged fetch for token management: maxChars caps the returned slice, offset pages a long
+  // transcript. Reports totalChars + truncated so a caller knows there is more to fetch.
+  get(id, { maxChars = null, offset = 0 } = {}) {
     const meta = this.db.get('SELECT id, title, type, date FROM records WHERE id = ?', [id]);
     if (!meta) return null;
     const body = this.db.get('SELECT text FROM fts WHERE id = ?', [id]);
-    return { ...meta, text: body?.text || '' };
+    const full = body?.text || '';
+    let text = offset ? full.slice(offset) : full;
+    let truncated = false;
+    if (maxChars && text.length > maxChars) { text = text.slice(0, maxChars); truncated = true; }
+    return { ...meta, text, totalChars: full.length, offset: Number(offset) || 0, truncated };
   }
 
   // Wipe every record — the user purging the on-disk warm copy. Returns how many were dropped.

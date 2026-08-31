@@ -46,7 +46,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.41';
+export const VERSION = '0.6.42';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -603,11 +603,23 @@ export function createGateway(cfg = loadConfig()) {
     if (pathname === '/v1/history/search' && req.method === 'POST') {
       try {
         const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
-        const results = historyStore.search(String(body.query || ''), { limit: Number(body.limit) || 10 });
+        const results = historyStore.search(String(body.query || ''), {
+          limit: Number(body.limit) || 10,
+          offset: Math.max(0, Number(body.offset) || 0),
+          type: body.type ? String(body.type) : null,
+          since: body.since != null ? Number(body.since) : null,
+          before: body.before != null ? Number(body.before) : null,
+        });
         return sendJson(res, 200, { ok: true, size: historyStore.size, newest: historyStore.newest, results });
       } catch (e) {
         return sendJson(res, 400, { error: { message: `search failed: ${e.message}`, type: 'search_error' } });
       }
+    }
+    // Graph navigation — records most connected to a given one.
+    if (pathname === '/v1/history/related' && req.method === 'GET') {
+      const id = String(url.searchParams.get('id') || '');
+      const limit = Math.min(30, Math.max(1, Number(url.searchParams.get('limit')) || 5));
+      return sendJson(res, 200, { ok: true, results: historyStore.related(id, { limit }) });
     }
     if (pathname === '/v1/history/status' && req.method === 'GET') {
       return sendJson(res, 200, { ok: true, size: historyStore.size, newest: historyStore.newest, bytes: historyStore.bytes });
@@ -639,7 +651,9 @@ export function createGateway(cfg = loadConfig()) {
       return sendJson(res, 200, { ok: true, ...historyStore.list({ limit, offset }) });
     }
     if (pathname === '/v1/history/get' && req.method === 'GET') {
-      const record = historyStore.get(String(url.searchParams.get('id') || ''));
+      const maxChars = url.searchParams.get('maxChars') != null ? Math.max(1, Number(url.searchParams.get('maxChars')) || 0) : null;
+      const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
+      const record = historyStore.get(String(url.searchParams.get('id') || ''), { maxChars, offset });
       if (!record) return sendJson(res, 404, { error: { message: 'no such record', type: 'not_found' } });
       return sendJson(res, 200, { ok: true, record });
     }

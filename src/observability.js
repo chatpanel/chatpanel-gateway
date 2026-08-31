@@ -2,7 +2,6 @@
 // The gateway keeps its dependency surface small; this one pure module is copied in
 // rather than pulling the whole events package, the same way the bridge vendors its
 // events files. Source of truth: chatpanel-events/observability.js.
-//
 // observability.js — the contract for "who consumed what, when, and how much is stored".
 //
 // ChatPanel's data is reachable by more than one agent now: the side panel, and any CLI
@@ -30,10 +29,13 @@ export const ACCESS_LOG_MAX = 500;
 // listed here is dropped. Content-bearing fields (a search `query`) are deliberately ABSENT —
 // the tool name already says "a search happened"; the words searched are not logged.
 const SAFE_ARGS = {
-  search_history: ['limit'],
+  // Metadata filters are safe to keep (they are not content) and useful to see in the log:
+  // "type=meeting since=7d". The search QUERY is deliberately absent — never recorded.
+  search_history: ['type', 'since', 'before', 'limit', 'offset'],
   list_history: ['limit', 'offset'],
-  get_record: ['id'],            // opaque record id, not content
-  open_skill: ['skill'],         // skill names are catalog identifiers, not PII
+  get_record: ['id', 'maxChars', 'offset'], // opaque record id + paging, not content
+  find_related: ['id', 'limit'],            // graph navigation from an opaque id
+  open_skill: ['skill'],                    // skill names are catalog identifiers, not PII
   read_skill_file: ['skill', 'path'],
   list_skills: ['limit'],
 };
