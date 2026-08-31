@@ -62,10 +62,12 @@ test('initialize returns instructions that steer history questions to the tools'
   assert.match(ins, /in addition|additionally/i); // additive steering — never "don't use your other tools"
 });
 
-test('tools/list returns the history tools with schemas', async () => {
+test('tools/list returns the history, memory and skill tools with schemas', async () => {
+  // One server, three things a local agent gets from ChatPanel: the user's HISTORY (what was
+  // said), their MEMORY (what is durably true of them), and the skills on this machine.
   const r = await handleRpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const names = r.result.tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['find_related', 'get_record', 'list_history', 'list_skills', 'open_skill', 'read_skill_file', 'search_history', 'smart_search']);
+  assert.deepEqual(names, ['find_related', 'forget', 'get_record', 'list_history', 'list_skills', 'open_skill', 'read_skill_file', 'recall', 'remember', 'search_history', 'smart_search']);
   for (const t of r.result.tools) assert.equal(t.inputSchema.type, 'object');
 });
 
@@ -130,3 +132,87 @@ test('notifications get no reply; unknown method is -32601', async () => {
 });
 
 test.after(() => { globalThis.fetch = realFetch; });
+
+// --- MEMORY over MCP: the point of the whole module ---------------------------------------
+// A CLI agent gets the user's standing facts through the same contract the side panel uses,
+// so "call me Alex, never open with a preamble" holds in the terminal too.
+
+test('recall hands back the SHARED rendering, not a second one', async () => {
+  // The gateway returns memoryBlock()'s output verbatim. If this proxy reformatted it, a CLI
+  // agent and the side panel would be told subtly different things and nobody would notice.
+  mockGateway({
+    'POST /v1/memory/recall': {
+      ok: true, size: 2,
+      memories: [{ id: 'a', kind: 'identity', text: 'Goes by Alex' }],
+      block: '## What you already know about this user\n- (identity) Goes by Alex',
+    },
+  });
+  try {
+    const r = await handleRpc({ jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'recall', arguments: { text: 'rename this' } } });
+    assert.equal(r.result.content[0].text, '## What you already know about this user\n- (identity) Goes by Alex');
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('an empty memory tells the agent how to fill it, rather than just saying no', async () => {
+  mockGateway({ 'POST /v1/memory/recall': { ok: true, size: 0, memories: [], block: '' } });
+  try {
+    const r = await handleRpc({ jsonrpc: '2.0', id: 21, method: 'tools/call', params: { name: 'recall', arguments: {} } });
+    assert.match(r.result.content[0].text, /empty/i);
+    assert.match(r.result.content[0].text, /`remember`/, 'and names the tool that fixes it');
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('a memory written by an agent is stamped with WHICH agent wrote it', async () => {
+  // There is no confirm dialog on a CLI, so attribution plus an inspectable list in the
+  // extension IS the accountability. Silent AND anonymous would be the bad combination.
+  let sent = null;
+  globalThis.fetch = async (url, init) => {
+    // Every tool call also reports to the access log, so key on the route we mean.
+    if (new URL(url).pathname === '/v1/memory/remember') sent = JSON.parse(init.body);
+    return { ok: true, status: 200, json: async () => ({ ok: true, action: 'create', record: { text: 'Prefers pnpm over npm' } }) };
+  };
+  try {
+    await handleRpc({ jsonrpc: '2.0', id: 22, method: 'initialize', params: { clientInfo: { name: 'codex' } } });
+    const r = await handleRpc({ jsonrpc: '2.0', id: 23, method: 'tools/call', params: { name: 'remember', arguments: { text: 'Prefers pnpm over npm', kind: 'preference' } } });
+    assert.equal(sent.source.via, 'mcp');
+    assert.equal(sent.source.agent, 'codex', 'the calling agent is recorded');
+    assert.match(r.result.content[0].text, /every future ChatPanel session/, 'and the agent is told the write is durable, so it says so');
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('a correction reads as a correction, and a restatement changes nothing', async () => {
+  mockGateway({ 'POST /v1/memory/remember': { ok: true, action: 'update', record: { text: 'Goes by Sam' }, replaced: { text: 'Goes by Alex' } } });
+  try {
+    const r = await handleRpc({ jsonrpc: '2.0', id: 24, method: 'tools/call', params: { name: 'remember', arguments: { text: 'Goes by Sam', kind: 'identity' } } });
+    assert.match(r.result.content[0].text, /was "Goes by Alex"/);
+  } finally { globalThis.fetch = realFetch; }
+  mockGateway({ 'POST /v1/memory/remember': { ok: true, action: 'duplicate', record: { text: 'Goes by Sam' } } });
+  try {
+    const r = await handleRpc({ jsonrpc: '2.0', id: 25, method: 'tools/call', params: { name: 'remember', arguments: { text: 'Goes by Sam' } } });
+    assert.match(r.result.content[0].text, /Already known/);
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('forget says exactly what went, and a miss is not silent', async () => {
+  mockGateway({ 'POST /v1/memory/forget': { ok: true, removed: [{ text: 'Runs Postgres in Frankfurt' }] } });
+  try {
+    const r = await handleRpc({ jsonrpc: '2.0', id: 26, method: 'tools/call', params: { name: 'forget', arguments: { query: 'the Frankfurt thing' } } });
+    assert.match(r.result.content[0].text, /Forgot: "Runs Postgres in Frankfurt"/);
+  } finally { globalThis.fetch = realFetch; }
+  mockGateway({ 'POST /v1/memory/forget': { ok: true, removed: [] } });
+  try {
+    const r = await handleRpc({ jsonrpc: '2.0', id: 27, method: 'tools/call', params: { name: 'forget', arguments: { query: 'nothing' } } });
+    assert.match(r.result.content[0].text, /No memory matches/);
+    assert.match(r.result.content[0].text, /recall/, 'and points at how to look');
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('the memory tools are advertised, and the instructions steer a model to them', async () => {
+  const list = await handleRpc({ jsonrpc: '2.0', id: 28, method: 'tools/list' });
+  const names = list.result.tools.map((t) => t.name);
+  for (const n of ['recall', 'remember', 'forget']) assert.ok(names.includes(n), `${n} is exposed`);
+
+  const init = await handleRpc({ jsonrpc: '2.0', id: 29, method: 'initialize', params: {} });
+  assert.match(init.result.instructions, /MEMORY/, 'the host is told memory exists');
+  assert.match(init.result.instructions, /call it EARLY/, 'and when to reach for it');
+});

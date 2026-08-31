@@ -17,6 +17,7 @@
 import { loadConfig } from './config.js';
 import { readBridgeToken } from './bridge.js';
 import { ensureGatewayToken } from './gateway-token.js';
+import { MEMORY_KINDS, MEMORY_KIND_NAMES } from './memory.js';
 
 const PROTOCOL_VERSION = '2024-11-05';
 const SERVER = { name: 'chatpanel-history', version: '1.0.0' };
@@ -42,6 +43,15 @@ const INSTRUCTIONS = [
   '  • get_record — the full text of one result id; use maxChars/offset to page a long',
   '    transcript instead of pulling it all into context.',
   '  • find_related — follow the graph: given a record id, the records most connected to it.',
+  '',
+  'ChatPanel also holds the user\'s MEMORY — a short list of durable facts about them (their',
+  'name, how they want answers written, what they are working on) that applies to EVERY task,',
+  'not just ones about their history:',
+  '  • recall — call it EARLY in a session, and whenever the user states a preference, to see',
+  '    what is already known. Then simply follow it; do not tell them you looked.',
+  '  • remember — save a new durable fact when they state one ("call me Alex", "always use',
+  '    pnpm"). One short sentence. Not for task details or anything true only today.',
+  '  • forget — remove one when they say it no longer holds.',
   'Prefer these for the user\'s history and combine them with your other tools as you see fit.',
   'Every result states how fresh the local copy is; if something recent is missing it may not',
   'have synced yet — say so rather than concluding it does not exist.',
@@ -175,6 +185,38 @@ const TOOLS = [
     },
   },
   {
+    name: 'recall',
+    description: "What ChatPanel already knows about the USER — their name, how they want answers written, their ongoing work and environment. Short and cheap; call it at the START of a session and whenever the user states a preference, then just FOLLOW what it returns without announcing that you checked. Pass the current task in `text` and it also returns the facts relevant to that task, not only the always-on ones. This is memory, not history: for what was said in a meeting or a past chat use smart_search instead.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'What the user is asking about right now, so task-relevant facts come back too. Omit for just the always-on ones.' },
+      },
+    },
+  },
+  {
+    name: 'remember',
+    description: "Save a durable fact about the USER to ChatPanel, carried into every future session on every model and agent — the side panel, other CLIs, everything. Use it the moment they state a standing preference (\"always use pnpm\"), an identity fact (\"call me Alex\") or a constraint that will still be true next week. Do NOT use it for task details, anything obvious from the current work, or notes about a codebase — those belong in the repo. One short self-contained sentence, written in the third person. Saving is a change to the user's own data, so say in a short clause what you saved.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'The fact, one short sentence in the third person ("Prefers pnpm over npm"). Max 280 characters.' },
+        kind: { type: 'string', enum: MEMORY_KIND_NAMES, description: MEMORY_KIND_NAMES.map((k) => `${k}: ${MEMORY_KINDS[k].hint}`).join(' ') },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Optional short tags for grouping.' },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'forget',
+    description: 'Remove a memory from ChatPanel when the user says it no longer holds. Name it however they did ("the Frankfurt thing") or pass the id from recall — it matches on meaning, and tells you exactly what it removed.',
+    inputSchema: {
+      type: 'object',
+      properties: { query: { type: 'string', description: 'The memory to remove: its text, roughly how the user named it, or its id.' } },
+      required: ['query'],
+    },
+  },
+  {
     name: 'list_skills',
     description: 'List the reusable skills installed on this machine (via the ChatPanel bridge) — across every agent harness (Claude Code, Codex, Copilot, Gemini, Hermes) and any configured folder. Returns each skill\'s name and one-line description. Call open_skill to load the one that fits the task.',
     inputSchema: { type: 'object', properties: {} },
@@ -209,6 +251,16 @@ function horizonLine(newest, size) {
   const d = new Date(newest);
   const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   return `Index: ${size} records, current through ${iso} (local warm copy — items newer than this may not have synced from ChatPanel yet).`;
+}
+
+// Memory WRITES are admin-gated on the gateway (a drive-by localhost page must not be able to
+// install a standing instruction), so they carry the gateway token — readable only by this
+// same-user process. Reads need none: an open warm index is the product.
+function writeAuth() {
+  try {
+    const token = ensureGatewayToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch { return {}; }
 }
 
 async function gatewayJson(path, init) {
@@ -314,6 +366,49 @@ async function callTool(name, args = {}) {
     if (!items.length) return 'History is empty (or the gateway has not been seeded yet — open ChatPanel with warm sync enabled).';
     const newest = items[0]?.date || null;
     return [horizonLine(newest, data.total), '', `${items.length} of ${data.total} records:`, ...items.map((it) => `[${it.id}] ${it.title || '(untitled)'} · ${it.type}${it.date ? ' · ' + new Date(it.date).toISOString().slice(0, 10) : ''} · ${it.chars} chars`)].join('\n');
+  }
+  if (name === 'recall') {
+    const data = await gatewayJson('/v1/memory/recall', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: String(args.text || '') }),
+    });
+    if (!data.memories?.length) {
+      return data.size
+        ? 'Nothing in ChatPanel memory applies here.'
+        : 'ChatPanel memory is empty — nothing is known about this user yet. Use `remember` when they state something durable about themselves or how they want to work.';
+    }
+    // The SHARED rendering, straight from the gateway, so a CLI agent is told exactly what
+    // the side panel's models are told. Two renderings would drift, invisibly.
+    return data.block;
+  }
+  if (name === 'remember') {
+    const text = String(args.text || '').trim();
+    if (!text) return 'remember needs `text` — one short sentence about the user.';
+    const data = await gatewayJson('/v1/memory/remember', {
+      method: 'POST', headers: { 'content-type': 'application/json', ...writeAuth() },
+      body: JSON.stringify({
+        text,
+        kind: args.kind ? String(args.kind) : 'fact',
+        tags: Array.isArray(args.tags) ? args.tags.map(String) : [],
+        // Attribution is the accountability here. A CLI has no confirm dialog to show, so
+        // instead every memory an agent writes is stamped with WHICH agent wrote it and
+        // shows up that way in the extension's Memory page, where the user can correct or
+        // delete it. Silent and anonymous would be the unacceptable combination.
+        source: { via: 'mcp', surface: 'mcp', agent: clientName },
+      }),
+    });
+    if (data.action === 'duplicate') return `Already known: "${data.record.text}" — nothing changed.`;
+    if (data.action === 'update') return `Updated memory to "${data.record.text}" (was "${data.replaced?.text}"). It applies to every future session.`;
+    return `Remembered: "${data.record.text}". It applies to every future ChatPanel session, on every model.`;
+  }
+  if (name === 'forget') {
+    const query = String(args.query || '').trim();
+    if (!query) return 'forget needs `query` — the memory to remove.';
+    const data = await gatewayJson('/v1/memory/forget', {
+      method: 'POST', headers: { 'content-type': 'application/json', ...writeAuth() }, body: JSON.stringify({ query }),
+    });
+    if (!data.removed?.length) return `No memory matches "${query}". Call recall to see what is stored.`;
+    return `Forgot: ${data.removed.map((m) => `"${m.text}"`).join(', ')}.`;
   }
   if (name === 'list_skills') {
     let data;

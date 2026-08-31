@@ -31,6 +31,7 @@ import { shaperFor } from './shape.js';
 import { startNer } from './ner.js';
 import { installTimestampedConsole } from './log.js';
 import { saveBackupSecret, clearBackupSecret, loadBackupSecret, hasBackupSecret } from './history-store.js';
+import { createMemoryStore } from './memory-store.js';
 import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackups } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
@@ -55,6 +56,7 @@ export const VERSION = '0.6.44';
 // Persistent + memory-mapped, so a restart needs no re-ingest (no cold start).
 // See docs/architecture-data-tiers.
 const historyStore = await createHistoryStore();
+const memoryStore = await createMemoryStore();
 
 // OBSERVABILITY — a ring of "which agent read what, when", persisted across restarts (the
 // gateway updates often; an empty panel after each restart reads as "nothing is set up").
@@ -539,6 +541,15 @@ export function createGateway(cfg = loadConfig()) {
     if ((pathname === '/v1/history/ingest' || pathname === '/v1/history/clear') && req.method === 'POST' && !isAdminAuthorized(req)) {
       return sendJson(res, 403, { error: { message: 'history write — extension origin or gateway token required', type: 'forbidden' } });
     }
+    // Memory WRITES follow the same rule as history ingest, for a stronger reason: a memory is
+    // carried into every future turn on every model, so a drive-by localhost page that could
+    // POST one would be installing a standing instruction, not injecting a single record.
+    // Reads stay open — that IS the product (Codex and Claude Code recall through it).
+    if ((pathname === '/v1/memory/remember' || pathname === '/v1/memory/forget'
+      || pathname === '/v1/memory/sync' || pathname === '/v1/memory/clear')
+      && req.method === 'POST' && !isAdminAuthorized(req)) {
+      return sendJson(res, 403, { error: { message: 'memory write — extension origin or gateway token required', type: 'forbidden' } });
+    }
     // The access log is who-read-what — sensitive, and writable only by the local MCP
     // process (which sends the gateway token). Extension Origin or token for both the
     // read (dashboard) and the report (MCP child); a drive-by page has neither.
@@ -598,6 +609,80 @@ export function createGateway(cfg = loadConfig()) {
         return sendJson(res, 400, { error: { message: `ingest failed: ${e.message}`, type: 'ingest_error' } });
       }
     }
+    // --- MEMORY. Small, durable facts about the user, reachable by every local agent.
+    //   GET  /v1/memory/list                      → { memories }
+    //   POST /v1/memory/recall  { text, scopes }  → { memories, block }
+    //   POST /v1/memory/remember { text, kind, … }→ { action, record }
+    //   POST /v1/memory/forget  { query }         → { removed }
+    //   POST /v1/memory/sync    { upserts, removes } → { size, merged, memories }
+    if (pathname === '/v1/memory/list' && req.method === 'GET') {
+      return sendJson(res, 200, { ok: true, size: memoryStore.size, memories: memoryStore.list() });
+    }
+    if (pathname === '/v1/memory/recall' && req.method === 'POST') {
+      try {
+        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+        const got = memoryStore.recall({
+          text: String(body.text || ''),
+          scopes: Array.isArray(body.scopes) && body.scopes.length ? body.scopes.map(String) : ['global'],
+          limit: Number(body.limit) || 0,
+          maxChars: Number(body.maxChars) || 0,
+        });
+        return sendJson(res, 200, { ok: true, size: memoryStore.size, ...got });
+      } catch (e) {
+        return sendJson(res, 400, { error: { message: `recall failed: ${e.message}`, type: 'memory_error' } });
+      }
+    }
+    if (pathname === '/v1/memory/remember' && req.method === 'POST') {
+      try {
+        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+        const out = memoryStore.remember({
+          text: String(body.text || ''),
+          kind: body.kind ? String(body.kind) : 'fact',
+          scope: body.scope ? String(body.scope) : 'global',
+          tags: Array.isArray(body.tags) ? body.tags.map(String) : [],
+          // WHO PROPOSED IT, always recorded. There is no confirm dialog on a CLI, so
+          // attribution plus an inspectable list in the extension IS the accountability —
+          // see the MCP server's note on why writes are allowed but never anonymous.
+          source: {
+            via: String(body.source?.via || 'mcp'),
+            surface: String(body.source?.surface || 'mcp'),
+            agent: String(body.source?.agent || ''),
+            ref: String(body.source?.ref || ''),
+          },
+        });
+        return sendJson(res, 200, { ok: true, action: out.action, record: out.record, replaced: out.replaces || null, size: memoryStore.size });
+      } catch (e) {
+        return sendJson(res, 400, { error: { message: e.message, type: 'memory_error' } });
+      }
+    }
+    if (pathname === '/v1/memory/forget' && req.method === 'POST') {
+      try {
+        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+        const { removed } = memoryStore.forget(String(body.query || ''));
+        return sendJson(res, 200, { ok: true, removed, size: memoryStore.size });
+      } catch (e) {
+        return sendJson(res, 400, { error: { message: e.message, type: 'memory_error' } });
+      }
+    }
+    if (pathname === '/v1/memory/sync' && req.method === 'POST') {
+      try {
+        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+        const out = memoryStore.bulk({
+          upserts: Array.isArray(body.upserts) ? body.upserts : [],
+          removes: Array.isArray(body.removes) ? body.removes : [],
+        });
+        // The full set comes BACK, so one round trip is the whole two-way merge: the client
+        // pushes what it has and receives what the agents wrote. Convergent because both
+        // sides reconcile with the same function.
+        return sendJson(res, 200, { ok: true, ...out, memories: memoryStore.list() });
+      } catch (e) {
+        return sendJson(res, 400, { error: { message: `memory sync failed: ${e.message}`, type: 'memory_error' } });
+      }
+    }
+    if (pathname === '/v1/memory/clear' && req.method === 'POST') {
+      return sendJson(res, 200, { ok: true, dropped: memoryStore.clear(), size: memoryStore.size });
+    }
+
     if (pathname === '/v1/history/clear' && req.method === 'POST') {
       const dropped = historyStore.clear();
       return sendJson(res, 200, { ok: true, dropped, size: historyStore.size });

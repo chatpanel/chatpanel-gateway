@@ -15,3 +15,4 @@ process.env.CHATPANEL_HISTORY_STORE = join(dir, 'history-store.enc');
 process.env.CHATPANEL_HISTORY_KEY = join(dir, 'history-key');
 process.env.CHATPANEL_HISTORY_SECRET = join(dir, 'history-secret.enc');
 process.env.CHATPANEL_ACCESS_LOG = join(dir, 'access-log.json');
+process.env.CHATPANEL_MEMORY_STORE = join(dir, 'memory-store.enc');
