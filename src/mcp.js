@@ -16,9 +16,30 @@
 
 import { loadConfig } from './config.js';
 import { readBridgeToken } from './bridge.js';
+import { ensureGatewayToken } from './gateway-token.js';
 
 const PROTOCOL_VERSION = '2024-11-05';
 const SERVER = { name: 'chatpanel-history', version: '1.0.0' };
+
+// The calling agent's self-reported name (from MCP `initialize` clientInfo), so the
+// observability dashboard can say WHICH agent read what. Untrusted; the gateway coerces it.
+let clientName = 'unknown';
+
+// Report one tool call to the long-lived gateway service's access log. Fire-and-forget:
+// telemetry must never slow, block or fail a tool call. Authorized with the gateway token
+// (readable only by this same-user process), so a drive-by localhost page can't forge entries.
+// Raw args are sent, but the server REDACTS them before storing (a search query is never
+// kept) — and the query already crossed this same loopback on the search call itself.
+function reportAccess(evt) {
+  try {
+    const token = ensureGatewayToken();
+    fetch(`${baseUrl()}/v1/observability/access`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify(evt),
+    }).catch(() => {});
+  } catch { /* no token or gateway down — drop the telemetry, never the call */ }
+}
 
 function baseUrl() {
   const env = process.env.CHATPANEL_GATEWAY_URL;
@@ -201,12 +222,20 @@ export async function handleRpc(msg) {
   try {
     switch (method) {
       case 'initialize':
+        clientName = params?.clientInfo?.name || clientName;
         return ok({ protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: SERVER });
       case 'tools/list':
         return ok({ tools: TOOLS });
       case 'tools/call': {
-        const text = await callTool(params?.name, params?.arguments || {});
-        return ok({ content: [{ type: 'text', text }] });
+        const started = Date.now();
+        try {
+          const text = await callTool(params?.name, params?.arguments || {});
+          reportAccess({ client: clientName, tool: params?.name, ok: true, ms: Date.now() - started, args: params?.arguments || {} });
+          return ok({ content: [{ type: 'text', text }] });
+        } catch (e) {
+          reportAccess({ client: clientName, tool: params?.name, ok: false, ms: Date.now() - started, args: params?.arguments || {}, error: e.message });
+          throw e;
+        }
       }
       case 'ping':
         return ok({});

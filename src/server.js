@@ -41,17 +41,25 @@ import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MOD
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, applyNerModelSelection, persistConfig, configPath } from './configstore.js';
 import { resolveDestination, aggregateModelsAsync } from './router.js';
+import { createAccessLog, makeAccessEvent } from './observability.js';
 import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.38';
+export const VERSION = '0.6.39';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
 // Persistent + memory-mapped, so a restart needs no re-ingest (no cold start).
 // See docs/architecture-data-tiers.
 const historyStore = await createHistoryStore();
+
+// OBSERVABILITY — an in-memory ring of "which agent read what, when". Populated by the
+// MCP server process (chatpanel-gateway mcp) reporting each tool call here, so a person
+// can SEE cross-agent access in ChatPanel's dashboard. In-memory by design: a working
+// session's activity, not an audit trail that itself becomes data to protect. The note on
+// each event is redacted (never a search query) by makeAccessEvent.
+const accessLog = createAccessLog();
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
@@ -529,6 +537,12 @@ export function createGateway(cfg = loadConfig()) {
     if (pathname === '/v1/history/ingest' && req.method === 'POST' && !isAdminAuthorized(req)) {
       return sendJson(res, 403, { error: { message: 'history ingest is a write — extension origin or gateway token required', type: 'forbidden' } });
     }
+    // The access log is who-read-what — sensitive, and writable only by the local MCP
+    // process (which sends the gateway token). Extension Origin or token for both the
+    // read (dashboard) and the report (MCP child); a drive-by page has neither.
+    if (pathname.startsWith('/v1/observability') && !isAdminAuthorized(req)) {
+      return sendJson(res, 403, { error: { message: 'observability: extension origin or gateway token required', type: 'forbidden' } });
+    }
 
     if (req.method === 'GET' && pathname === '/health') {
       // `stt` is ADDITIVE (Tesla rule): old clients ignore it, new clients use it
@@ -592,7 +606,28 @@ export function createGateway(cfg = loadConfig()) {
       }
     }
     if (pathname === '/v1/history/status' && req.method === 'GET') {
-      return sendJson(res, 200, { ok: true, size: historyStore.size, newest: historyStore.newest });
+      return sendJson(res, 200, { ok: true, size: historyStore.size, newest: historyStore.newest, bytes: historyStore.bytes });
+    }
+
+    // OBSERVABILITY (admin-gated above).
+    //   GET  /v1/observability            → { storage:{warm:{records,bytes,newest}}, access:[…] }
+    //   POST /v1/observability/access     ← the MCP process reports one tool call
+    if (pathname === '/v1/observability' && req.method === 'GET') {
+      const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 200));
+      return sendJson(res, 200, {
+        ok: true,
+        storage: { warm: { records: historyStore.size, bytes: historyStore.bytes, newest: historyStore.newest } },
+        access: accessLog.snapshot(limit),
+      });
+    }
+    if (pathname === '/v1/observability/access' && req.method === 'POST') {
+      try {
+        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+        const evt = accessLog.push(makeAccessEvent({ ts: Date.now(), ...body }));
+        return sendJson(res, 200, { ok: true, event: evt });
+      } catch (e) {
+        return sendJson(res, 400, { error: { message: `access log failed: ${e.message}`, type: 'observability_error' } });
+      }
     }
     if (pathname === '/v1/history/list' && req.method === 'GET') {
       const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 50));

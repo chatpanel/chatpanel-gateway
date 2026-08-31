@@ -13,7 +13,7 @@
 // tier, not this one. The file on disk is useless without the local key.
 
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, unlinkSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import os from 'node:os';
 import { SearchIndex } from './search-index.js';
@@ -102,6 +102,11 @@ export class HistoryStore {
     let max = 0;
     for (const r of this.records.values()) if ((r.date || 0) > max) max = r.date || 0;
     return max || null;
+  }
+
+  // On-disk footprint for the storage dashboard: the encrypted store file.
+  get bytes() {
+    try { return existsSync(this.storePath) ? statSync(this.storePath).size : 0; } catch { return 0; }
   }
 
   key() {

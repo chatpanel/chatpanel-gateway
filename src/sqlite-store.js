@@ -15,7 +15,7 @@
 // via history-store.js's saveBackupSecret.
 
 import { join } from 'node:path';
-import { mkdirSync, chmodSync, existsSync } from 'node:fs';
+import { mkdirSync, chmodSync, existsSync, statSync } from 'node:fs';
 import os from 'node:os';
 import { HistoryStore } from './history-store.js';
 
@@ -90,6 +90,22 @@ export class SqliteHistoryStore {
 
   get size() {
     return this.db.get('SELECT COUNT(*) c FROM records')?.c || 0;
+  }
+
+  // Freshness horizon — the newest record's timestamp. The MCP tools surface this so
+  // an agent knows how current the warm copy is (and stops denying un-synced items).
+  get newest() {
+    return this.db.get('SELECT MAX(date) m FROM records')?.m || 0;
+  }
+
+  // On-disk footprint for the storage dashboard: the .db plus its WAL/shm sidecars.
+  get bytes() {
+    if (this.path === ':memory:') return 0;
+    let total = 0;
+    for (const p of [this.path, `${this.path}-wal`, `${this.path}-shm`]) {
+      try { if (existsSync(p)) total += statSync(p).size; } catch { /* ignore */ }
+    }
+    return total;
   }
 
   bulk({ upserts = [], removes = [] } = {}) {
