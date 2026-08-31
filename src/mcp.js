@@ -21,6 +21,25 @@ import { ensureGatewayToken } from './gateway-token.js';
 const PROTOCOL_VERSION = '2024-11-05';
 const SERVER = { name: 'chatpanel-history', version: '1.0.0' };
 
+// MCP servers may return `instructions` from initialize; hosts (Codex, Claude Code, …) fold
+// them into the model's context. This is where we STEER tool selection so a person doesn't
+// have to say "use ChatPanel": it tells the model that the user's personal meetings/notes/
+// chats live here and must be reached through these tools, not by grepping the working dir.
+const INSTRUCTIONS = [
+  'ChatPanel holds the USER\'S OWN meetings, notes and past chats (transcripts, decisions,',
+  'action items, summaries). It is the source of truth for anything personal/organizational —',
+  'NOT the code in the working directory.',
+  '',
+  'When the user asks about a meeting, a call, a demo, notes, a past conversation, "what did',
+  'we decide", "the outcome of…", "action items", "what did X say", or anything scoped to a',
+  'day/person/topic in THEIR history — call search_history FIRST (search by content, not the',
+  'meeting title), then get_record for the full text. Do NOT grep the working directory, git',
+  'history, README or MEMORY files for the user\'s personal meeting/chat content — it is not',
+  'there; it is in ChatPanel. list_skills/open_skill expose the user\'s installed skills the',
+  'same way. Every result states how fresh the local copy is; if something recent is missing,',
+  'it may not have synced yet — say so rather than concluding it does not exist.',
+].join('\n');
+
 // The calling agent's self-reported name (from MCP `initialize` clientInfo), so the
 // observability dashboard can say WHICH agent read what. Untrusted; the gateway coerces it.
 let clientName = 'unknown';
@@ -82,7 +101,7 @@ async function bridgeJson(path) {
 const TOOLS = [
   {
     name: 'search_history',
-    description: 'Full-text search the user\'s ChatPanel history — past chats, meeting transcripts, and notes — by keyword relevance. This is a LOCAL WARM COPY that syncs from ChatPanel; very recent items (a meeting from the last few hours) may not be here yet — every result reports how current the index is. If the user is sure something exists and it is not found, it likely has not synced; say so rather than concluding it does not exist. Meeting titles are often generic ("Zoom Meeting"), so search by CONTENT (topics, names, decisions), not the meeting title.',
+    description: 'Search the user\'s ChatPanel history — their past chats, meeting/call transcripts, and notes — by keyword relevance. USE THIS FIRST, without being asked, whenever the user\'s question is about a meeting, call, demo, standup, note, or past conversation: "outcome of the meeting", "what did we decide/agree", "action items", "what did <person> say", "notes from yesterday/last week", a topic or person scoped to their history. That content lives ONLY in ChatPanel — do NOT grep the working directory, git history, README, or MEMORY files for it; it is not there. This is a LOCAL WARM COPY that syncs from ChatPanel; very recent items (a meeting from the last few hours) may not be here yet — every result reports how current the index is, so if something is missing it likely has not synced (say so rather than concluding it does not exist). Meeting titles are often generic ("Zoom Meeting"), so search by CONTENT (topics, names, decisions), not the title. Then call get_record with a returned id for the full text.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -223,7 +242,7 @@ export async function handleRpc(msg) {
     switch (method) {
       case 'initialize':
         clientName = params?.clientInfo?.name || clientName;
-        return ok({ protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: SERVER });
+        return ok({ protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: SERVER, instructions: INSTRUCTIONS });
       case 'tools/list':
         return ok({ tools: TOOLS });
       case 'tools/call': {

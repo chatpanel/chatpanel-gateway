@@ -51,6 +51,17 @@ test('initialize advertises tools capability', async () => {
   assert.ok(r.result.protocolVersion);
 });
 
+test('initialize returns instructions that steer history questions to the tools', async () => {
+  // This is what makes an agent reach for ChatPanel without being told: the server
+  // instructions claim the meetings/notes/chats domain and say NOT to grep local files.
+  const r = await handleRpc({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+  const ins = r.result.instructions || '';
+  assert.ok(ins.length > 100, 'instructions present');
+  assert.match(ins, /meeting/i);
+  assert.match(ins, /search_history/);
+  assert.match(ins, /not (grep|there)|do NOT grep/i);
+});
+
 test('tools/list returns the three history tools with schemas', async () => {
   const r = await handleRpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const names = r.result.tools.map((t) => t.name).sort();
