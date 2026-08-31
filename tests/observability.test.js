@@ -1,4 +1,5 @@
 // The gateway's access log: who-read-what, admin-gated, and PII-redacted before storage.
+import './isolate-store.js'; // MUST be first — gives this file its own warm store
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGateway } from '../src/server.js';
@@ -33,6 +34,9 @@ test('access log records the agent + tool but REDACTS the query', async () => {
 
 test('storage stats report warm-tier records/bytes/newest', async () => {
   const { gw, url } = await start();
+  // The warm store is a process singleton shared with every other test file in this run —
+  // normalize before asserting counts, or a neighbour's fixtures decide the result.
+  await fetch(`${url}/v1/history/clear`, { method: 'POST', headers: ADMIN, body: '{}' });
   await fetch(`${url}/v1/history/ingest`, { method: 'POST', headers: ADMIN, body: JSON.stringify({ upserts: [{ id: 'm1', text: 'quarterly plan', title: 'Zoom Meeting', type: 'meeting', date: 1_700_000_000_000 }] }) });
   const obs = await (await fetch(`${url}/v1/observability`, { headers: ADMIN })).json();
   assert.equal(obs.storage.warm.records, 1);

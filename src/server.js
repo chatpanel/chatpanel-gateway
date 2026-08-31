@@ -43,11 +43,12 @@ import { publicConfig, applyConfigPatch, applyNerModelSelection, persistConfig, 
 import { resolveDestination, aggregateModelsAsync } from './router.js';
 import { makeAccessEvent } from './observability.js';
 import { createPersistentAccessLog } from './access-log-store.js';
+import { planQueries, multiSearch } from './rrf.js';
 import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.43';
+export const VERSION = '0.6.44';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -614,6 +615,38 @@ export function createGateway(cfg = loadConfig()) {
         return sendJson(res, 200, { ok: true, size: historyStore.size, newest: historyStore.newest, results });
       } catch (e) {
         return sendJson(res, 400, { error: { message: `search failed: ${e.message}`, type: 'search_error' } });
+      }
+    }
+    // SMART SEARCH — one round trip that expands the question into several complementary
+    // queries, runs them all, and RRF-fuses the results. A natural-language question is a
+    // poor BM25 query; asking three ways and fusing beats asking once, and doing it here
+    // means the agent pays one call instead of probing repeatedly.
+    if (pathname === '/v1/history/smart-search' && req.method === 'POST') {
+      try {
+        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+        const question = String(body.question || body.query || '');
+        // The agent's own formulations lead (it understands the domain); planQueries adds
+        // deterministic variants and dedupes.
+        const queries = planQueries(question, {
+          extra: Array.isArray(body.queries) ? body.queries.map(String) : [],
+          max: Math.min(6, Math.max(1, Number(body.maxQueries) || 4)),
+        });
+        const filters = {
+          type: body.type ? String(body.type) : null,
+          since: body.since != null ? Number(body.since) : null,
+          before: body.before != null ? Number(body.before) : null,
+        };
+        const perQuery = Math.min(30, Math.max(5, Number(body.limit) || 10) * 2);
+        const results = await multiSearch(
+          queries,
+          (q) => historyStore.search(q, { limit: perQuery, ...filters }),
+          { limit: Math.min(50, Math.max(1, Number(body.limit) || 10)) },
+        );
+        return sendJson(res, 200, {
+          ok: true, size: historyStore.size, newest: historyStore.newest, queries, results,
+        });
+      } catch (e) {
+        return sendJson(res, 400, { error: { message: `smart search failed: ${e.message}`, type: 'search_error' } });
       }
     }
     // Graph navigation — records most connected to a given one.

@@ -65,7 +65,7 @@ test('initialize returns instructions that steer history questions to the tools'
 test('tools/list returns the history tools with schemas', async () => {
   const r = await handleRpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const names = r.result.tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['find_related', 'get_record', 'list_history', 'list_skills', 'open_skill', 'read_skill_file', 'search_history']);
+  assert.deepEqual(names, ['find_related', 'get_record', 'list_history', 'list_skills', 'open_skill', 'read_skill_file', 'search_history', 'smart_search']);
   for (const t of r.result.tools) assert.equal(t.inputSchema.type, 'object');
 });
 

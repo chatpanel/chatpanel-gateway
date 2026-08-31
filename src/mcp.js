@@ -33,7 +33,10 @@ const INSTRUCTIONS = [
   'meeting, call, demo, note, or past conversation ("outcome of the meeting", "what did we',
   'decide", "action items", "notes from yesterday", a person/day/topic in their history),',
   'ALSO consult ChatPanel — it is the source of truth for that personal history:',
-  '  • search_history — search by CONTENT (not the generic meeting title). Supports filters:',
+  '  • smart_search — START HERE: give it the question plus 2-4 of your own keyword',
+  '    phrasings; it runs them all and fuses the rankings, finding what one query misses.',
+  '  • search_history — one exact keyword query, when you already know the terms. Search by',
+  '    CONTENT (not the generic meeting title). Supports filters:',
   '    type (chat|meeting|note), since/before (dates or relative like "7d", "yesterday"),',
   '    and limit/offset paging. Returns compact snippets, not full bodies.',
   '  • get_record — the full text of one result id; use maxChars/offset to page a long',
@@ -103,6 +106,22 @@ async function bridgeJson(path) {
 }
 
 const TOOLS = [
+  {
+    name: 'smart_search',
+    description: 'BEST first choice for a question about the user\'s ChatPanel history (meetings, notes, past chats). Ask it a natural-language QUESTION and it expands that into several complementary keyword queries, runs them all, and fuses the rankings — which finds things a single query misses, in one round trip instead of several probes. You know the domain, so pass 2-4 of your own phrasings in `queries` too (e.g. for "what did we decide in the Ben demo": ["Ben demo decisions", "tooling demo action items", "demo outcome next steps"]). Supports the same filters as search_history (type, since, before) and returns snippets with each result\'s id; follow up with get_record for the full text or find_related to expand around a hit.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'The user\'s question, in natural language.' },
+        queries: { type: 'array', items: { type: 'string' }, description: 'Your own 2-4 keyword formulations of it — these lead the search.' },
+        type: { type: 'string', enum: ['chat', 'meeting', 'note'], description: 'Only this kind of record.' },
+        since: { type: 'string', description: 'Earliest date: 2026-08-01, or a window like "7d"/"yesterday".' },
+        before: { type: 'string', description: 'Latest date: a date or window like `since`.' },
+        limit: { type: 'number', description: 'Max fused results (default 10).' },
+      },
+      required: ['question'],
+    },
+  },
   {
     name: 'search_history',
     description: 'Search the user\'s ChatPanel history — their past chats, meeting/call transcripts, and notes — by keyword relevance. Consult this (in ADDITION to your other tools) whenever the question touches a meeting, call, demo, note, or past conversation: "outcome of the meeting", "what did we decide", "action items", "what did <person> say", "notes from yesterday". Filters: `type` (chat|meeting|note), `since`/`before` (a date like 2026-08-01 or a relative window like "7d"/"yesterday"), and `limit`/`offset` for paging. Returns compact SNIPPETS (the matching excerpt) with each record\'s id/title/type/date — token-friendly; call get_record for the full text and find_related to follow connections. This is a LOCAL WARM COPY that syncs from ChatPanel; very recent items may not be here yet — results report how current the index is, so if something is missing it likely has not synced. Meeting titles are often generic ("Zoom Meeting"), so search by CONTENT, not the title.',
@@ -230,6 +249,30 @@ function parseWhen(v) {
 const fmtRow = (r, i) => `${i + 1}. [${r.id}] ${r.title || '(untitled)'} · ${r.type}${r.date ? ' · ' + new Date(r.date).toISOString().slice(0, 10) : ''}${r.snippet ? `\n     ${r.snippet}` : ''}`;
 
 async function callTool(name, args = {}) {
+  if (name === 'smart_search') {
+    const body = {
+      question: String(args.question || ''),
+      queries: Array.isArray(args.queries) ? args.queries.map(String) : [],
+      limit: Number(args.limit) || 10,
+    };
+    if (args.type) body.type = String(args.type);
+    const since = parseWhen(args.since); if (since != null) body.since = since;
+    const before = parseWhen(args.before); if (before != null) body.before = before;
+    const data = await gatewayJson('/v1/history/smart-search', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const rows = data.results || [];
+    const horizon = horizonLine(data.newest, data.size);
+    const asked = (data.queries || []).map((q) => `"${q}"`).join(', ');
+    if (!rows.length) {
+      return `No match for "${args.question}".\nSearched ${data.queries?.length || 0} way(s): ${asked}.\n${horizon}\nIf you expected a recent item it may not have synced yet — check ChatPanel directly, or try different keywords (meeting titles are often generic).`;
+    }
+    return [
+      horizon, '',
+      `${rows.length} result(s) for "${args.question}" — searched ${data.queries.length} way(s): ${asked}`,
+      ...rows.map((r, i) => `${fmtRow(r, i)}${r.foundBy?.length > 1 ? `\n     (matched ${r.foundBy.length} of the queries)` : ''}`),
+    ].join('\n') + '\n\nget_record <id> for full text (maxChars/offset to page) · find_related <id> to follow connections.';
+  }
   if (name === 'search_history') {
     const body = { query: String(args.query || ''), limit: Number(args.limit) || 10, offset: Math.max(0, Number(args.offset) || 0) };
     if (args.type) body.type = String(args.type);
