@@ -59,13 +59,13 @@ test('initialize returns instructions that steer history questions to the tools'
   assert.ok(ins.length > 100, 'instructions present');
   assert.match(ins, /meeting/i);
   assert.match(ins, /search_history/);
-  assert.match(ins, /not (grep|there)|do NOT grep/i);
+  assert.match(ins, /in addition|additionally/i); // additive steering — never "don't use your other tools"
 });
 
-test('tools/list returns the three history tools with schemas', async () => {
+test('tools/list returns the history tools with schemas', async () => {
   const r = await handleRpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const names = r.result.tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['get_record', 'list_history', 'list_skills', 'open_skill', 'read_skill_file', 'search_history']);
+  assert.deepEqual(names, ['find_related', 'get_record', 'list_history', 'list_skills', 'open_skill', 'read_skill_file', 'search_history']);
   for (const t of r.result.tools) assert.equal(t.inputSchema.type, 'object');
 });
 

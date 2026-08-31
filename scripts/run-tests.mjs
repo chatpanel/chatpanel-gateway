@@ -32,6 +32,7 @@ const child = spawn(process.execPath, ['--test', ...files], {
     CHATPANEL_HISTORY_STORE: join(dir, 'history-store.enc'),
     CHATPANEL_HISTORY_KEY: join(dir, 'history-key'),
     CHATPANEL_HISTORY_SECRET: join(dir, 'history-secret.enc'),
+    CHATPANEL_ACCESS_LOG: join(dir, 'access-log.json'),
   },
 });
 child.on('close', (code) => {

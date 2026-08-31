@@ -41,12 +41,13 @@ import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MOD
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, applyNerModelSelection, persistConfig, configPath } from './configstore.js';
 import { resolveDestination, aggregateModelsAsync } from './router.js';
-import { createAccessLog, makeAccessEvent } from './observability.js';
+import { makeAccessEvent } from './observability.js';
+import { createPersistentAccessLog } from './access-log-store.js';
 import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.42';
+export const VERSION = '0.6.43';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -54,12 +55,12 @@ export const VERSION = '0.6.42';
 // See docs/architecture-data-tiers.
 const historyStore = await createHistoryStore();
 
-// OBSERVABILITY — an in-memory ring of "which agent read what, when". Populated by the
-// MCP server process (chatpanel-gateway mcp) reporting each tool call here, so a person
-// can SEE cross-agent access in ChatPanel's dashboard. In-memory by design: a working
-// session's activity, not an audit trail that itself becomes data to protect. The note on
-// each event is redacted (never a search query) by makeAccessEvent.
-const accessLog = createAccessLog();
+// OBSERVABILITY — a ring of "which agent read what, when", persisted across restarts (the
+// gateway updates often; an empty panel after each restart reads as "nothing is set up").
+// Populated by the MCP process (chatpanel-gateway mcp) reporting each tool call, so a person
+// can SEE cross-agent access in ChatPanel's dashboard. Safe to persist: every event is
+// metadata only — client/tool/ms + a REDACTED note (a search query's text is never in it).
+const accessLog = createPersistentAccessLog();
 
 const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
 
