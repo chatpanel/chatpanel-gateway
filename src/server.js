@@ -63,7 +63,7 @@ const historyStore = await createHistoryStore();
 // metadata only — client/tool/ms + a REDACTED note (a search query's text is never in it).
 const accessLog = createPersistentAccessLog();
 
-const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity']);
+const KNOWN_AGENTS = new Set(['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity', 'hermes']);
 
 // Auto-narrow: arm only the top-K most-relevant MCP tools per turn (speed). Mirrors
 // the extension's AUTO mode via the SAME shared ranker. We narrow only tools whose
