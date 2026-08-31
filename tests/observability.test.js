@@ -40,3 +40,20 @@ test('storage stats report warm-tier records/bytes/newest', async () => {
   assert.ok(obs.storage.warm.bytes >= 0);
   gw.close();
 });
+
+test('POST /v1/history/clear purges the warm copy; gated to admin', async () => {
+  const { gw, url } = await start();
+  try {
+    // The warm store is a process singleton shared across this file's gateways — normalize
+    // to empty first so the assertions don't depend on what earlier tests ingested.
+    await fetch(`${url}/v1/history/clear`, { method: 'POST', headers: ADMIN, body: '{}' });
+    await fetch(`${url}/v1/history/ingest`, { method: 'POST', headers: ADMIN, body: JSON.stringify({ upserts: [{ id: 'a', text: 'x', date: 1 }, { id: 'b', text: 'y', date: 2 }] }) });
+    assert.equal((await (await fetch(`${url}/v1/history/status`)).json()).size, 2);
+    assert.equal((await fetch(`${url}/v1/history/clear`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 403, 'clear is admin-gated');
+    const r = await (await fetch(`${url}/v1/history/clear`, { method: 'POST', headers: ADMIN, body: '{}' })).json();
+    assert.equal(r.dropped, 2);
+    assert.equal((await (await fetch(`${url}/v1/history/status`)).json()).size, 0, 'empty after clear');
+  } finally {
+    gw.close();
+  }
+});

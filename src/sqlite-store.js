@@ -153,6 +153,14 @@ export class SqliteHistoryStore {
     const body = this.db.get('SELECT text FROM fts WHERE id = ?', [id]);
     return { ...meta, text: body?.text || '' };
   }
+
+  // Wipe every record — the user purging the on-disk warm copy. Returns how many were dropped.
+  clear() {
+    const n = this.size;
+    this.db.exec('DELETE FROM records');
+    this.db.exec('DELETE FROM fts');
+    return n;
+  }
 }
 
 // Pick the best available warm engine. SQLite when it loads; otherwise the

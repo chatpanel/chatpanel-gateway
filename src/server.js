@@ -46,7 +46,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.39';
+export const VERSION = '0.6.40';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -534,8 +534,8 @@ export function createGateway(cfg = loadConfig()) {
     // WRITES are not: a drive-by localhost page or a random local process must not be
     // able to inject records the model then trusts as the user's real history. Ingest
     // requires the extension Origin (which its POST always carries) or the gateway token.
-    if (pathname === '/v1/history/ingest' && req.method === 'POST' && !isAdminAuthorized(req)) {
-      return sendJson(res, 403, { error: { message: 'history ingest is a write — extension origin or gateway token required', type: 'forbidden' } });
+    if ((pathname === '/v1/history/ingest' || pathname === '/v1/history/clear') && req.method === 'POST' && !isAdminAuthorized(req)) {
+      return sendJson(res, 403, { error: { message: 'history write — extension origin or gateway token required', type: 'forbidden' } });
     }
     // The access log is who-read-what — sensitive, and writable only by the local MCP
     // process (which sends the gateway token). Extension Origin or token for both the
@@ -595,6 +595,10 @@ export function createGateway(cfg = loadConfig()) {
       } catch (e) {
         return sendJson(res, 400, { error: { message: `ingest failed: ${e.message}`, type: 'ingest_error' } });
       }
+    }
+    if (pathname === '/v1/history/clear' && req.method === 'POST') {
+      const dropped = historyStore.clear();
+      return sendJson(res, 200, { ok: true, dropped, size: historyStore.size });
     }
     if (pathname === '/v1/history/search' && req.method === 'POST') {
       try {

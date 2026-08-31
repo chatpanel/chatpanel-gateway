@@ -178,6 +178,15 @@ export class HistoryStore {
     return this.records.size;
   }
 
+  // Wipe every record — the user purging the on-disk warm copy. Returns how many were dropped.
+  clear() {
+    const n = this.records.size;
+    this.records.clear();
+    this.index = new SearchIndex();
+    this.schedulePersist();
+    return n;
+  }
+
   search(query, opts) {
     return this.index.search(query, opts);
   }
