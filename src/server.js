@@ -41,7 +41,7 @@ import { MODEL_CATALOG, isKnownModel, isValidCustomModelId } from './models.js';
 import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MODEL, STT_DTYPES, isValidDtype } from './stt-models.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, applyNerModelSelection, persistConfig, configPath } from './configstore.js';
-import { resolveDestination, aggregateModelsAsync } from './router.js';
+import { resolveDestination, aggregateModelsAsync, listDestinations } from './router.js';
 import { makeAccessEvent } from './observability.js';
 import { createPersistentAccessLog } from './access-log-store.js';
 import { planQueries, multiSearch } from './rrf.js';
@@ -49,7 +49,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.46';
+export const VERSION = '0.6.47';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -282,7 +282,10 @@ async function probeNerHealth(cfg) {
 function forwardHeaders(headers, base) {
   const out = {};
   for (const [k, v] of Object.entries(headers)) {
-    if (!HOP_BY_HOP.has(k.toLowerCase())) out[k] = v;
+    const lower = k.toLowerCase();
+    // ChatPanel's own routing metadata is for THIS hop and is not the provider's business.
+    if (lower.startsWith('x-chatpanel-')) continue;
+    if (!HOP_BY_HOP.has(lower)) out[k] = v;
   }
   out['accept-encoding'] = 'identity'; // must read plain text to restore tokens
   try { out.host = new URL(base).host; } catch { /* leave unset */ }
@@ -1168,7 +1171,44 @@ export function createGateway(cfg = loadConfig()) {
 
     // Route by the requested model → a destination (agent via the bridge, or an
     // API we forward to). Falls back to the legacy backend when none configured.
-    const dest = resolveDestination(body?.model, cfg, r.kind);
+    // ChatPanel's own routing envelope, never the provider's business. A caller that knows
+    // WHICH destination it means says so here instead of hoping a model id is unique — 39 ids
+    // on a three-provider machine already collide once you ignore case, and two providers
+    // offering the same id exactly is ordinary. Without this, `dests.find(...)` picks whichever
+    // destination happens to come first and the call goes out on the wrong provider's key.
+    // ChatPanel's routing metadata travels in HEADERS, not in the request body.
+    //
+    // It started as a `chatpanel` field on the JSON body, and NVIDIA answered "unsupported
+    // parameters" — OpenAI-compatible providers validate the body strictly and reject fields
+    // they do not know, while ignoring headers they do not know. A body field also breaks
+    // against any gateway older than the one that strips it, which is every gateway already
+    // installed. The body belongs to the provider; this hop gets its own channel.
+    //
+    // The legacy body field is still honoured (and removed) so a client that has not updated
+    // yet keeps working instead of 400ing at the provider.
+    const legacy = (body && typeof body.chatpanel === 'object' && body.chatpanel) || null;
+    if (legacy) {
+      delete body.chatpanel;
+      outBody = Buffer.from(JSON.stringify(body), 'utf8');
+    }
+    const hint = {
+      destination: String(req.headers['x-chatpanel-destination'] || legacy?.destination || '').trim(),
+      reach: String(req.headers['x-chatpanel-reach'] || legacy?.reach || '').trim(),
+    };
+    const dest = resolveDestination(body?.model, cfg, r.kind, { destination: hint.destination });
+    // An EXPLICIT destination that does not resolve is an error, not an invitation to fall
+    // back. Falling back would send a credential-bearing call to a provider the user did not
+    // choose — the silent-misroute version of the bug this field exists to prevent.
+    if (hint.destination && (!dest || dest.id !== hint.destination)) {
+      trace?.commit();
+      return sendJson(res, 404, {
+        error: {
+          message: `no destination "${hint.destination}" is configured on this gateway`,
+          type: 'unknown_destination',
+          known: listDestinations(cfg).map((d) => d.id),
+        },
+      });
+    }
     if (trace) {
       trace.meta = { t: Date.now(), model: body?.model || null, dest: dest ? dest.id : null, type: dest ? dest.type : null, redacted: redactedCount, sanitized: sanitizedCount, narrowed: narrowedTools, detail: redactionDetail(vault, cfg.logDetail) };
     }

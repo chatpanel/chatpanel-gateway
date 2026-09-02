@@ -41,10 +41,14 @@ export function listDestinations(cfg) {
 
 // Pick the destination that serves `model` (explicit membership → id/agent match →
 // a same-protocol fallback → the first destination).
-export function resolveDestination(model, cfg, kind) {
+export function resolveDestination(model, cfg, kind, { destination = '' } = {}) {
   const dests = listDestinations(cfg);
   const wantsAnthropic = kind === 'anthropic';
   const protoOk = (d) => (wantsAnthropic ? d.protocol === 'anthropic' : d.protocol !== 'anthropic');
+  // An explicit destination wins outright and never falls through: the caller named the
+  // provider it means, so guessing a different one would be worse than failing. The caller
+  // checks that what came back is what it asked for.
+  if (destination) return dests.find((d) => d.id === destination) || null;
   return (
     // Explicit: a destination that serves this exact model (a known agent like codex
     // matches its own agent destination here — so it ALWAYS goes to the bridge).
