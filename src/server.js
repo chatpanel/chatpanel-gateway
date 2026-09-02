@@ -49,7 +49,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.45';
+export const VERSION = '0.6.46';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -429,6 +429,24 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
 
 // ---- backend: api ----------------------------------------------------------
 
+// Join a destination's base URL to the incoming path WITHOUT doubling the API version.
+//
+// Every OpenAI-compatible provider tells you to paste a base that already ends at the version
+// — https://integrate.api.nvidia.com/v1, https://openrouter.ai/api/v1, https://router.hugging
+// face.co/v1 — and the request arriving here carries the version too (/v1/chat/completions).
+// Concatenating them produced /v1/v1/chat/completions, and what came back was the provider's
+// own "404 page not found". That reads like a broken gateway, or a wrong model, or a dead
+// channel — anything except the mis-joined URL it actually was.
+//
+// Matching on the leading segment rather than hardcoding "v1" so a provider on /v2 or a beta
+// path is joined correctly too.
+export function joinUpstream(base, pathname, search = '') {
+  const b = String(base || '').replace(/\/+$/, '');
+  const seg = String(pathname || '').split('/')[1];
+  if (seg && b.endsWith(`/${seg}`)) return b.slice(0, -(seg.length + 1)) + pathname + search;
+  return b + pathname + search;
+}
+
 async function handleApi(req, res, { adapter, kind, pathname, search, base, destKey, destProtocol, harness, trace }, outBody, vault) {
   let upstream;
   const up0 = trace ? trace.clock() : 0;
@@ -443,7 +461,7 @@ async function handleApi(req, res, { adapter, kind, pathname, search, base, dest
     // SSRF guard on the config-supplied upstream: block cloud-metadata + non-http(s)
     // BEFORE the fetch. Loopback/LAN stay allowed (Ollama/LM Studio/homelab are the
     // point of a BYO gateway); only the credential-theft pivot is refused.
-    const upstreamUrl = assertEndpointUrl(base.replace(/\/$/, '') + pathname + search).toString();
+    const upstreamUrl = assertEndpointUrl(joinUpstream(base, pathname, search)).toString();
     upstream = await fetch(upstreamUrl, {
       method: req.method,
       headers,
