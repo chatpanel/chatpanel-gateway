@@ -19,13 +19,18 @@ export function persistConfig(cfg, path = configPath()) {
   // detector key, and the entitlement/bridge tokens — same secret-at-rest posture
   // as the history key/secret files, so it isn't left world-readable on a shared host.
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  // NOTE: this is an explicit allowlist, so a NEW config section does not persist
+  // until it is added here — and the symptom is a setting that silently reverts on
+  // restart, which reads as "the feature is broken" rather than "it was not saved".
+  // tests/configstore.test.js fails if a key in DEFAULTS is neither listed here nor
+  // deliberately excluded below.
   const out = {
     host: cfg.host, port: cfg.port, backend: cfg.backend,
     // Destinations (the configured agents + API models) MUST persist — otherwise a
     // restart drops them and every model falls back to the default OpenAI upstream.
     destinations: cfg.destinations,
     bridge: cfg.bridge, upstreams: cfg.upstreams, redaction: cfg.redaction,
-    ner: cfg.ner, stt: cfg.stt, allowedOrigins: cfg.allowedOrigins, maxBodyBytes: cfg.maxBodyBytes,
+    ner: cfg.ner, stt: cfg.stt, tts: cfg.tts, allowedOrigins: cfg.allowedOrigins, maxBodyBytes: cfg.maxBodyBytes,
     pro: cfg.pro, logRequests: cfg.logRequests, logDetail: cfg.logDetail, tools: cfg.tools,
   };
   // mode on writeFileSync only applies when CREATING the file; chmod after covers an

@@ -53,7 +53,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.53';
+export const VERSION = '0.6.54';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -457,6 +457,11 @@ export function joinUpstream(base, pathname, search = '') {
 // Paths this gateway serves ITSELF. Used only to tell "you asked for a local
 // feature I do not have" apart from "you asked me to proxy something upstream" —
 // without it, calling a route added in a newer version reports a provider failure.
+// How long to wait for the speaker model before telling the caller to retry. Long
+// enough to cover loading one already on disk (seconds) plus a slow first fetch,
+// short enough that a stuck download does not hold a request open forever.
+const EMBEDDER_WAIT_MS = 90_000;
+
 const LOCAL_NAMESPACES = ['/tts', '/stt', '/ner', '/diarize', '/skills', '/config', '/logs', '/status', '/admin'];
 
 async function handleApi(req, res, { adapter, kind, pathname, search, base, destKey, destProtocol, harness, trace }, outBody, vault) {
@@ -994,7 +999,12 @@ export function createGateway(cfg = loadConfig()) {
           supportsVoices: ttsEngine.supportsVoices(),
           supportsCustomVoices: ttsEngine.supportsCustomVoices(),
           sampleRate: ttsEngine.sampleRate(),
-          voices: ttsEngine.arch() === 'vits' ? [] : TTS_VOICES.map((v) => ({ ...v, installed: ttsEngine.voiceOnDisk(v.id, active) })),
+          // Built-in voices belong to Kokoro alone. VITS is single-speaker and
+          // SpeechT5 speaks only in a RECORDED voice, so offering Kokoro's list
+          // for either would be offering choices that cannot take effect.
+          voices: ttsEngine.arch() && ttsEngine.arch() !== 'style-tts2'
+            ? []
+            : TTS_VOICES.map((v) => ({ ...v, installed: ttsEngine.voiceOnDisk(v.id, active) })),
           dtype: cfg.tts?.dtype || 'auto',
           loadedDtype: ttsEngine.health().dtype,
           runtime: ttsEngine.health().runtime,
@@ -1055,15 +1065,30 @@ export function createGateway(cfg = loadConfig()) {
           return sendJson(res, 400, { error: { message: 'need at least 1 second of 16 kHz mono audio', type: 'sample_too_short' } });
         }
         try {
-          // The embedder is the speaker model diarization already uses. If it is
-          // not resident yet, start it and say so — a ~100 MB download is not
-          // something to do silently while the user waits on a spinner.
+          // The embedder is the speaker model diarization already uses. WAIT for it
+          // rather than bailing: it is usually already on disk, where loading takes
+          // a couple of seconds — and the caller is holding a recording someone
+          // just made, so returning early means they lose it and record again.
+          // Only a genuine first-time download can outlast the ceiling, and that is
+          // the one case worth reporting as "come back in a moment".
           if (!diarizeEngine.isReady()) {
-            diarizeEngine.download({ onLog: (m) => console.log(m) });
-            return sendJson(res, 503, {
-              error: { message: 'the speaker model is downloading (~100 MB) — try again in a moment', type: 'embedder_not_ready' },
-              progress: diarizeEngine.progress(),
-            });
+            const load = diarizeEngine.download({ onLog: (m) => console.log(m) });
+            const timedOut = Symbol('timeout');
+            const raced = await Promise.race([
+              load.then(() => null).catch((e) => e),
+              new Promise((r) => setTimeout(() => r(timedOut), EMBEDDER_WAIT_MS)),
+            ]);
+            if (raced === timedOut || !diarizeEngine.isReady()) {
+              return sendJson(res, 503, {
+                error: {
+                  message: raced === timedOut
+                    ? 'the speaker model is still downloading (~100 MB) — your recording was kept, press Save again shortly'
+                    : `the speaker model failed to load: ${diarizeEngine.health().error || 'unknown error'}`,
+                  type: 'embedder_not_ready',
+                },
+                progress: diarizeEngine.progress(),
+              });
+            }
           }
           const vec = await diarizeEngine.embed(Float32Array.from(pcm));
           const saved = ttsVoices.saveVoice({ name, vec });
@@ -1105,7 +1130,17 @@ export function createGateway(cfg = loadConfig()) {
       const voice = rawVoice || (dest ? dest.voice : (cfg.tts?.voice || DEFAULT_TTS_VOICE));
       // `custom:<id>` names a saved voice. It is resolved to an embedding here so
       // the engine never has to know where voices are stored.
-      const customId = dest ? null : ttsVoices.parseCustomVoice(voice);
+      let customId = dest ? null : ttsVoices.parseCustomVoice(voice);
+      // The active model may REQUIRE an embedding while the configured voice still
+      // names a built-in one — switching to SpeechT5 does not rewrite `voice`, and
+      // a client that never sends one inherits whatever was there. Rather than
+      // failing with "record a voice" at someone who already has, fall back to the
+      // most recent saved voice. Erroring is right only when there is genuinely
+      // none to use.
+      if (!dest && !customId && ttsEngine.supportsCustomVoices()) {
+        const saved = ttsVoices.listVoices();
+        if (saved.length) customId = saved[0].id;
+      }
       let speakerEmbedding = null;
       if (customId) {
         const rec = ttsVoices.getVoice(customId);
@@ -1163,6 +1198,7 @@ export function createGateway(cfg = loadConfig()) {
           'Content-Length': String(out.length),
           'Cache-Control': 'no-store',
           'X-Tts-Sample-Rate': String(rate),
+          ...(customId ? { 'X-Tts-Voice': `custom:${customId}` } : {}),
         });
         return res.end(out);
       } catch (e) {

@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, rmSync } from 'node:fs';
+import { readFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { persistConfig, applyConfigPatch, applyNerModelSelection, publicConfig } from '../src/configstore.js';
+import { DEFAULTS } from '../src/config.js';
 
 test('persistConfig round-trips DESTINATIONS (a restart must not drop configured agents/APIs)', () => {
   const cfg = {
@@ -67,4 +68,29 @@ test('selecting an NER model enables autostart and preserves the remaining detec
   assert.equal(initial.autostart, true);
   assert.equal(initial.allowDownload, true);
   assert.equal(initial.enableFullTier, true);
+});
+
+// persistConfig writes an ALLOWLIST, so every new config section is one someone
+// has to remember to add — and forgetting shows up as a setting that reverts on
+// restart, which reads as a broken feature rather than an unsaved one. That is
+// exactly how the TTS model and voice were being lost.
+test('every default config section is either persisted or deliberately excluded', () => {
+  // Runtime-only or derived state that must NOT be written back.
+  const EXCLUDED = new Set([
+    'freeGate',      // recomputed from pro.free
+    'tools',         // present in the allowlist already; listed here only if absent
+  ]);
+  const dir = mkdtempSync(join(tmpdir(), 'cp-cfgstore-'));
+  const path = join(dir, 'gateway.config.json');
+  try {
+    // Give every top-level key a recognisable value, persist, and read back.
+    const cfg = JSON.parse(JSON.stringify(DEFAULTS));
+    persistConfig(cfg, path);
+    const written = JSON.parse(readFileSync(path, 'utf8'));
+    const missing = Object.keys(DEFAULTS).filter((k) => !(k in written) && !EXCLUDED.has(k));
+    assert.deepEqual(missing, [],
+      `these config sections would be LOST on restart: ${missing.join(', ')} — add them to persistConfig's allowlist`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

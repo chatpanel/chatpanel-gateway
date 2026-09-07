@@ -9,7 +9,10 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
 
-const DEFAULTS = {
+// Exported so tests can assert that every section here survives persistConfig's
+// allowlist — a new section that is not persisted reverts on restart, and that
+// reads as a broken feature rather than an unsaved setting.
+export const DEFAULTS = {
   host: '127.0.0.1',
   port: 4320,
 
