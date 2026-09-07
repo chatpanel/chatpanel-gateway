@@ -186,3 +186,16 @@ test('optional STT→NER hop: redact:true redacts finals via the shared guard', 
   assert.match(fin.text, /\[\[EMAIL_\d+\]\]/);
   gw.close();
 });
+
+// In a voice conversation every final is SENT as a question, so a 700ms pause
+// mid-thought sends half a sentence. The session may ask for a longer window; the
+// dictation default is unchanged, and the range is clamped so a client cannot
+// disable segmentation or make the engine wait forever.
+test('endSilenceMs is per-session, clamped, and defaults to the dictation value', async () => {
+  const stt = await import('../src/stt-engine.js');
+  assert.equal(stt.clampEndSilence(1400), 1400, 'a sensible conversational value passes through');
+  assert.equal(stt.clampEndSilence(50), 300, 'too short is raised to the floor — segments would never form');
+  assert.equal(stt.clampEndSilence(99999), 3000, 'too long is capped — the engine must not wait forever');
+  assert.equal(stt.clampEndSilence(undefined), 700, 'absent means the dictation default');
+  assert.equal(stt.clampEndSilence('nonsense'), 700, 'and so does garbage');
+});

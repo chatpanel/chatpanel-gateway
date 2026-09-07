@@ -54,7 +54,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.58';
+export const VERSION = '0.6.59';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -1389,7 +1389,9 @@ export function createGateway(cfg = loadConfig()) {
         // same composable model as everything else: any stage, with or without).
         // `diarize: true` (+ optional `speakerLabel` to pin the mic channel to a
         // name) attaches a speaker to each final.
-        const { id } = sttEngine.createSession({ lang: body?.lang, redact: body?.redact === true, diarize: wantDiarize, speakerLabel: body?.speakerLabel });
+        // `endSilenceMs` (additive) lets a voice conversation wait longer for a
+        // sentence to finish than dictation into a text box needs to.
+        const { id } = sttEngine.createSession({ lang: body?.lang, redact: body?.redact === true, diarize: wantDiarize, speakerLabel: body?.speakerLabel, endSilenceMs: body?.endSilenceMs });
         return sendJson(res, 201, { id, state: sttEngine.state() });
       } catch (e) {
         return sendJson(res, e.code === 'too_many_sessions' ? 429 : 500, { error: { message: e.message, type: e.code || 'stt_error' } });

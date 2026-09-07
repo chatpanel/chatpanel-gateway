@@ -238,13 +238,26 @@ let _decodeChain = Promise.resolve(); // whisper is effectively single-threaded 
 export function sessionCount() { return _sessions.size; }
 
 /** @param {{ lang?: string, redact?: boolean, diarize?: boolean, speakerLabel?: string }} [opts] */
-export function createSession({ lang, redact = false, diarize: diarizeOpt = false, speakerLabel = null } = {}) {
+// How long a pause commits a segment. The default suits dictation into a text box,
+// where a final just appends and a short pause costs nothing. In a VOICE
+// conversation every final is SENT as a question, so a 700ms pause mid-thought
+// ("I want to… um… go to Google") sends half a sentence. Callers may ask for more.
+const END_SILENCE_MIN_MS = 300;
+const END_SILENCE_MAX_MS = 3000;
+export function clampEndSilence(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n)) return SILENCE_FINAL_MS;
+  return Math.min(END_SILENCE_MAX_MS, Math.max(END_SILENCE_MIN_MS, Math.round(n)));
+}
+
+export function createSession({ lang, redact = false, diarize: diarizeOpt = false, speakerLabel = null, endSilenceMs = SILENCE_FINAL_MS } = {}) {
   if (_sessions.size >= MAX_SESSIONS) {
     const e = /** @type {Error & { code?: string }} */ (new Error('too many concurrent dictation sessions'));
     e.code = 'too_many_sessions'; throw e;
   }
   const s = {
     id: randomUUID(),
+    endSilenceMs: clampEndSilence(endSilenceMs),
     lang: typeof lang === 'string' && lang ? lang.slice(0, 12) : null,
     langTried: false, // language auto-detect runs once per session (multilingual models)
     // Opaque to this engine: the server applies the redaction hop to finals when
@@ -374,7 +387,7 @@ async function decodeSession(s, { flush = false } = {}) {
   s.lastDecodeAt = Date.now();
 
   const audio = concatBuffer(s);
-  const tail = Math.round((SILENCE_FINAL_MS / 1000) * SAMPLE_RATE);
+  const tail = Math.round(((s.endSilenceMs || SILENCE_FINAL_MS) / 1000) * SAMPLE_RATE);
   const trailingQuiet = audio.length > tail && rms(audio, audio.length - tail) < SILENCE_RMS;
 
   // Nothing but room tone? Don't decode (whisper hallucinates on silence) and
