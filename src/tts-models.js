@@ -74,7 +74,7 @@ export const TTS_MODEL_CATALOG = [
     sampleRate: 16000,
     voices: false,          // no built-in voices…
     customVoices: true,     // …but it is the ONE model here that can use yours
-    note: 'The only model here that speaks in a voice you record. Rougher than Kokoro, and the match is approximate — see the note under Your voices.',
+    note: 'Speaks using a voice you record — but it will NOT sound like you. It borrows pitch and timbre in a general way and produces a consistent voice of its own. Kokoro sounds better if you do not need a personal voice.',
   },
   {
     // One MMS entry so the second architecture is DISCOVERABLE from the list rather
