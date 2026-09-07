@@ -17,7 +17,7 @@ after(() => rmSync(MODELS, { recursive: true, force: true }));
 const tts = await import('../src/tts-engine.js');
 const {
   TTS_VOICES, TTS_MODEL_CATALOG, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, MAX_TTS_CHARS,
-  isKnownVoice, isValidVoiceId, isValidCustomTtsId, isKnownTtsModel, voiceLang, ttsModel,
+  isKnownVoice, isValidVoiceId, isValidCustomTtsId, isKnownTtsModel, voiceLang, ttsModel, ttsModelDtype,
   ttsModelEngine, isValidTtsDtype,
 } = await import('../src/tts-models.js');
 
@@ -194,11 +194,12 @@ test('health() is safe to call before anything is loaded', () => {
 // The engine drives two families. Getting this wrong is not a soft failure: a
 // VITS model loaded as Kokoro dies in the forward pass, and a VITS waveform
 // written into Kokoro's 24 kHz header plays back fast and chipmunked.
-test('the supported architectures are exactly the two the engine implements', () => {
+test('the supported architectures are exactly the ones the engine implements', () => {
   const { SUPPORTED_ARCH } = tts;
-  assert.deepEqual(Object.keys(SUPPORTED_ARCH).sort(), ['style_text_to_speech_2', 'vits']);
+  assert.deepEqual(Object.keys(SUPPORTED_ARCH).sort(), ['speecht5', 'style_text_to_speech_2', 'vits']);
   assert.equal(SUPPORTED_ARCH.style_text_to_speech_2, 'style-tts2');
   assert.equal(SUPPORTED_ARCH.vits, 'vits');
+  assert.equal(SUPPORTED_ARCH.speecht5, 'speecht5');
 });
 
 test('before anything loads, the defaults are Kokoro-shaped and safe to read', () => {
@@ -209,11 +210,27 @@ test('before anything loads, the defaults are Kokoro-shaped and safe to read', (
 
 test('the catalog declares an arch and a rate for every entry', () => {
   for (const m of TTS_MODEL_CATALOG) {
-    assert.ok(['style-tts2', 'vits'].includes(m.arch), `${m.id} has arch "${m.arch}"`);
+    assert.ok(['style-tts2', 'vits', 'speecht5'].includes(m.arch), `${m.id} has arch "${m.arch}"`);
     assert.ok(m.sampleRate > 0, `${m.id} must declare its output rate`);
     assert.equal(typeof m.voices, 'boolean', `${m.id} must say whether it has voices`);
-    // A single-speaker model must not claim voices, and vice versa.
-    assert.equal(m.voices, m.arch === 'style-tts2', `${m.id}: only Kokoro has selectable voices`);
+    // Built-in voices are a Kokoro thing; a RECORDED voice is a SpeechT5 thing.
+    // Nothing may claim both, and only speecht5 may claim the second.
+    assert.equal(m.voices, m.arch === 'style-tts2', `${m.id}: only Kokoro has built-in voices`);
+    assert.equal(!!m.customVoices, m.arch === 'speecht5', `${m.id}: only SpeechT5 takes a speaker embedding`);
+    assert.ok(!(m.voices && m.customVoices), `${m.id}: a model cannot have both kinds of voice`);
+  }
+});
+
+// The one model that takes a speaker embedding is also the one that must NOT run
+// at the runtime default: q8 renders about half of all embeddings as near-silence.
+test('SpeechT5 pins fp32 — at q8 the speaker conditioning collapses', () => {
+  const m = ttsModel('Xenova/speecht5_tts');
+  assert.ok(m, 'the custom-voice model must be in the catalog');
+  assert.equal(m.dtype, 'fp32');
+  assert.equal(ttsModelDtype('Xenova/speecht5_tts'), 'fp32', 'and the engine must read that pin');
+  // Nothing else pins a precision; they take the runtime default on purpose.
+  for (const other of TTS_MODEL_CATALOG.filter((x) => x.arch !== 'speecht5')) {
+    assert.equal(other.dtype, undefined, `${other.id} should follow the runtime default`);
   }
 });
 

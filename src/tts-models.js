@@ -56,6 +56,27 @@ export const TTS_MODEL_CATALOG = [
     note: 'The Mandarin-tuned Kokoro. Same engine and voice mechanism as v1.0.',
   },
   {
+    id: 'Xenova/speecht5_tts',
+    label: 'SpeechT5 — your own voice',
+    lang: 'English',
+    tier: 'custom',
+    arch: 'speecht5',
+    // PINNED to fp32, and not as a preference. At the runtime default (q8 on
+    // native) this model renders about half of all speaker embeddings as
+    // near-silence — measured: 91-92% of samples under the noise floor, where the
+    // same embeddings at fp32 produce clean speech at ~47% silence, which is just
+    // the pauses between words. The quantization is destroying the speaker
+    // conditioning, and the failure looks exactly like "voice cloning does not
+    // work" rather than "the precision is wrong".
+    dtype: 'fp32',
+    approxMB: 190,   // plus the ~50 MB HiFi-GAN vocoder it needs
+    ramMB: 500,
+    sampleRate: 16000,
+    voices: false,          // no built-in voices…
+    customVoices: true,     // …but it is the ONE model here that can use yours
+    note: 'The only model here that speaks in a voice you record. Rougher than Kokoro, and the match is approximate — see the note under Your voices.',
+  },
+  {
     // One MMS entry so the second architecture is DISCOVERABLE from the list rather
     // than only findable by search. The rest of the family (~1000 languages) is
     // exactly what the search box is for — listing them all here would be a menu,
@@ -121,6 +142,12 @@ export function ttsModelEngine(id) {
 export function ttsModelHasVoices(id) {
   const m = ttsModel(id);
   return m ? m.voices !== false : true;
+}
+
+// Can it speak in a voice the user recorded? Only SpeechT5 takes a speaker
+// embedding — the other two are conditioned on something fixed.
+export function ttsModelHasCustomVoices(id) {
+  return ttsModel(id)?.customVoices === true;
 }
 
 export function ttsModel(id) {

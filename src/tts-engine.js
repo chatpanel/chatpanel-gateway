@@ -41,14 +41,22 @@ let _dtype = null;
 let _err = null;
 let _progress = null;
 let _initPromise = null;
-let _arch = null;         // 'style-tts2' (Kokoro) | 'vits' (MMS et al)
+let _arch = null;         // 'style-tts2' (Kokoro) | 'vits' (MMS) | 'speecht5' (custom voices)
+let _vocoder = null;      // speecht5 only — mel → waveform
 let _rate = SAMPLE_RATE;  // the ACTIVE model's output rate
 const _voices = new Map(); // voice id → Float32Array style bank
 
 // The architectures this engine can actually drive. Anything else is refused at
 // load with a message naming what it is, rather than failing later inside a
 // forward pass with a shape error nobody can act on.
-export const SUPPORTED_ARCH = { style_text_to_speech_2: 'style-tts2', vits: 'vits' };
+export const SUPPORTED_ARCH = { style_text_to_speech_2: 'style-tts2', vits: 'vits', speecht5: 'speecht5' };
+
+// SpeechT5 is the only architecture here that takes a SPEAKER EMBEDDING, which is
+// what makes a custom voice possible at all: Kokoro's voices are fixed style banks
+// and VITS is single-speaker, so neither can be pointed at a person. It needs a
+// separate vocoder (mel → waveform), hence the extra model id.
+export const SPEECHT5_VOCODER = 'Xenova/speecht5_hifigan';
+export function supportsCustomVoices() { return _arch === 'speecht5'; }
 
 export function arch() { return _arch; }
 export function sampleRate() { return _rate; }
@@ -61,7 +69,7 @@ export function isReady() { return _state === 'ready' && !!_net; }
 export function progress() { return _progress; }
 
 export function health() {
-  return { configured: _state !== 'off', ok: isReady(), state: _state, model: _model, dtype: _dtype, runtime: runtimeName(), error: _err, arch: _arch, sampleRate: _rate, voices: supportsVoices() };
+  return { configured: _state !== 'off', ok: isReady(), state: _state, model: _model, dtype: _dtype, runtime: runtimeName(), error: _err, arch: _arch, sampleRate: _rate, voices: supportsVoices(), customVoices: supportsCustomVoices() };
 }
 
 export function modelDir(modelId) {
@@ -151,15 +159,22 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true, dtype:
     const onProgress = (p) => {
       if (p?.status === 'progress' && p.file) _progress = { model: modelId, file: p.file, pct: Math.round(p.progress || 0) };
     };
-    const Klass = kind === 'vits' ? tf.VitsModel : tf.StyleTextToSpeech2Model;
+    const Klass = kind === 'vits' ? tf.VitsModel
+      : kind === 'speecht5' ? tf.SpeechT5ForTextToSpeech
+        : tf.StyleTextToSpeech2Model;
     const [net, tok] = await Promise.all([
       Klass.from_pretrained(modelId, { dtype, progress_callback: onProgress }),
       tf.AutoTokenizer.from_pretrained(modelId),
     ]);
+    // The vocoder is a second download and a second failure point, so it is loaded
+    // only for the architecture that needs one.
+    _vocoder = kind === 'speecht5'
+      ? await tf.SpeechT5HifiGan.from_pretrained(SPEECHT5_VOCODER, { dtype, progress_callback: onProgress })
+      : null;
     _net = net; _tok = tok; _model = modelId; _dtype = dtype; _arch = kind;
     // VITS/MMS emit 16 kHz; Kokoro 24 kHz. Take it from the model's own config
     // where it says so, because guessing wrong plays the voice at the wrong pitch.
-    _rate = Number(net?.config?.sampling_rate) || (kind === 'vits' ? 16000 : SAMPLE_RATE);
+    _rate = Number(net?.config?.sampling_rate) || (kind === 'style-tts2' ? SAMPLE_RATE : 16000);
     _state = 'ready'; _err = null; _progress = null;
     log(`[tts] ready — model ${modelId} @ ${dtype} (${kind}, ${_rate} Hz, ${runtimeName()}, offline) — local speech active`);
     return true;
@@ -260,7 +275,7 @@ export function splitSentences(text, maxChars = 300) {
  * Synthesize ONE chunk. Returns 24 kHz mono Float32 PCM.
  * @param {string} text @param {{voice?: string, speed?: number}} [opts]
  */
-export async function synthChunk(text, { voice = DEFAULT_TTS_VOICE, speed = 1 } = {}) {
+export async function synthChunk(text, { voice = DEFAULT_TTS_VOICE, speed = 1, speakerEmbedding = null } = {}) {
   if (!isReady()) throw new Error('tts model not ready');
   const tf = await import('@huggingface/transformers');
 
@@ -271,6 +286,20 @@ export async function synthChunk(text, { voice = DEFAULT_TTS_VOICE, speed = 1 } 
     const inputs = _tok(String(text));
     const out = await _net(inputs);
     return out.waveform.data;
+  }
+
+  // SpeechT5: conditioned by a 512-d speaker embedding, which is the whole point —
+  // it is the one architecture here that can be pointed at a person's voice.
+  // Without an embedding there is no voice to speak in, so this refuses rather
+  // than inventing one.
+  if (_arch === 'speecht5') {
+    if (!speakerEmbedding || speakerEmbedding.length !== 512) {
+      throw new Error('this model needs a saved voice — record one in Settings → Text-to-speech');
+    }
+    const { input_ids } = _tok(String(text));
+    const emb = new tf.Tensor('float32', Float32Array.from(speakerEmbedding), [1, 512]);
+    const { waveform } = await _net.generate_speech(input_ids, emb, { vocoder: _vocoder });
+    return waveform.data;
   }
 
   const { phonemize } = await import('phonemizer');
@@ -294,11 +323,11 @@ export async function synthChunk(text, { voice = DEFAULT_TTS_VOICE, speed = 1 } 
 }
 
 /** Synthesize arbitrary-length text, chunk by chunk. `onChunk` sees each as it lands. */
-export async function synth(text, { voice = DEFAULT_TTS_VOICE, speed = 1, onChunk = null } = {}) {
+export async function synth(text, { voice = DEFAULT_TTS_VOICE, speed = 1, speakerEmbedding = null, onChunk = null } = {}) {
   const chunks = splitSentences(text);
   const out = [];
   for (const c of chunks) {
-    const pcm = await synthChunk(c, { voice, speed });
+    const pcm = await synthChunk(c, { voice, speed, speakerEmbedding });
     out.push(pcm);
     onChunk?.(pcm);
   }
@@ -337,6 +366,6 @@ export function toWav(pcm, sampleRate = SAMPLE_RATE) {
 
 export function _reset() {
   _state = 'off'; _model = null; _net = null; _tok = null; _dtype = null;
-  _err = null; _progress = null; _initPromise = null; _arch = null; _rate = SAMPLE_RATE;
+  _err = null; _progress = null; _initPromise = null; _arch = null; _rate = SAMPLE_RATE; _vocoder = null;
   _voices.clear();
 }

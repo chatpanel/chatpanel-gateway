@@ -42,6 +42,7 @@ import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MOD
 import * as ttsEngine from './tts-engine.js';
 import { TTS_MODEL_CATALOG, TTS_VOICES, isKnownTtsModel, isValidCustomTtsId, isKnownVoice, isValidVoiceId, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, TTS_DTYPES, isValidTtsDtype, MAX_TTS_CHARS } from './tts-models.js';
 import { ttsDestination, synthesizeRemote, isValidRemoteVoice } from './tts-remote.js';
+import * as ttsVoices from './tts-voices.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, applyNerModelSelection, persistConfig, configPath } from './configstore.js';
 import { resolveDestination, aggregateModelsAsync, listDestinations } from './router.js';
@@ -52,7 +53,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.52';
+export const VERSION = '0.6.53';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -986,6 +987,7 @@ export function createGateway(cfg = loadConfig()) {
           // hide the picker rather than offer choices that cannot take effect.
           arch: ttsEngine.arch(),
           supportsVoices: ttsEngine.supportsVoices(),
+          supportsCustomVoices: ttsEngine.supportsCustomVoices(),
           sampleRate: ttsEngine.sampleRate(),
           voices: ttsEngine.arch() === 'vits' ? [] : TTS_VOICES.map((v) => ({ ...v, installed: ttsEngine.voiceOnDisk(v.id, active) })),
           dtype: cfg.tts?.dtype || 'auto',
@@ -1001,8 +1003,14 @@ export function createGateway(cfg = loadConfig()) {
         if (id && !(isKnownTtsModel(id) || isValidCustomTtsId(id))) return sendJson(res, 400, { error: { message: 'unknown or invalid model id', type: 'bad_model' } });
         // A voice id becomes a filename, so it is checked against the catalog AND
         // its shape before it is ever persisted.
+        // A default voice may be a built-in Kokoro one OR a saved custom one; both
+        // live in the same field, so both shapes are accepted and both validated.
         const voice = body && typeof body.voice === 'string' ? body.voice.trim() : null;
-        if (voice && !(isKnownVoice(voice) && isValidVoiceId(voice))) return sendJson(res, 400, { error: { message: 'unknown or invalid voice', type: 'bad_voice' } });
+        if (voice) {
+          const cid = ttsVoices.parseCustomVoice(voice);
+          const okVoice = cid ? !!ttsVoices.getVoice(cid) : (isKnownVoice(voice) && isValidVoiceId(voice));
+          if (!okVoice) return sendJson(res, 400, { error: { message: 'unknown or invalid voice', type: 'bad_voice' } });
+        }
         const dtype = body && typeof body.dtype === 'string' && isValidTtsDtype(body.dtype) ? body.dtype : undefined;
         if (!cfg.tts) cfg.tts = { enabled: true, model: DEFAULT_TTS_MODEL, voice: DEFAULT_TTS_VOICE, allowDownload: true };
         if (id) cfg.tts.model = id;
@@ -1011,6 +1019,59 @@ export function createGateway(cfg = loadConfig()) {
         try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
         if (id) ttsEngine.setModel(id, { onLog: (m) => console.log(m), dtype: dtype || cfg.tts.dtype || 'auto' });
         return sendJson(res, 202, { accepted: true, active: cfg.tts.model, voice: cfg.tts.voice, dtype: cfg.tts.dtype || 'auto', state: ttsEngine.state(), progress: ttsEngine.progress() });
+      }
+    }
+
+    // --- Custom voices: a speaker embedding derived from a sample the user
+    // recorded. The AUDIO is embedded in-process and then discarded; only the 512
+    // floats are stored, under ~/.chatpanel, and they never leave this machine.
+    // See src/tts-voices.js for why the rules here are tighter than elsewhere.
+    if (pathname === '/tts/voices') {
+      if (req.method === 'GET') {
+        return sendJson(res, 200, {
+          voices: ttsVoices.listVoices(),
+          // Whether a saved voice can actually be USED right now depends on the
+          // active model — only SpeechT5 takes an embedding. Saying so here stops
+          // the UI offering voices that would be silently ignored.
+          usable: ttsEngine.supportsCustomVoices(),
+          embedder: diarizeEngine.DIARIZE_MODEL,
+          embedderReady: diarizeEngine.isReady(),
+        });
+      }
+      if (req.method === 'POST') {
+        let body = null;
+        try { body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')); } catch { body = null; }
+        const name = body && typeof body.name === 'string' ? body.name.trim() : '';
+        const pcm = body && Array.isArray(body.pcm) ? body.pcm : null;
+        if (!name) return sendJson(res, 400, { error: { message: 'a name is required', type: 'bad_request' } });
+        if (!pcm || pcm.length < 16000) {
+          // Under a second of audio produces an embedding dominated by whatever
+          // noise happened to be in it, and the resulting voice is arbitrary.
+          return sendJson(res, 400, { error: { message: 'need at least 1 second of 16 kHz mono audio', type: 'sample_too_short' } });
+        }
+        try {
+          // The embedder is the speaker model diarization already uses. If it is
+          // not resident yet, start it and say so — a ~100 MB download is not
+          // something to do silently while the user waits on a spinner.
+          if (!diarizeEngine.isReady()) {
+            diarizeEngine.download({ onLog: (m) => console.log(m) });
+            return sendJson(res, 503, {
+              error: { message: 'the speaker model is downloading (~100 MB) — try again in a moment', type: 'embedder_not_ready' },
+              progress: diarizeEngine.progress(),
+            });
+          }
+          const vec = await diarizeEngine.embed(Float32Array.from(pcm));
+          const saved = ttsVoices.saveVoice({ name, vec });
+          console.log(`[tts] saved custom voice "${saved.name}" (${saved.dim}-d, sample discarded)`);
+          return sendJson(res, 201, { ...saved, usable: ttsEngine.supportsCustomVoices() });
+        } catch (e) {
+          return sendJson(res, 400, { error: { message: e.message, type: 'save_failed' } });
+        }
+      }
+      if (req.method === 'DELETE') {
+        const id = url.searchParams.get('id') || '';
+        // Deleting someone's voice print is not a soft delete — the file is gone.
+        return sendJson(res, 200, { deleted: ttsVoices.deleteVoice(id) });
       }
     }
 
@@ -1037,7 +1098,21 @@ export function createGateway(cfg = loadConfig()) {
       // not a Kokoro one), so the local catalog check would reject every valid id.
       const rawVoice = body && typeof body.voice === 'string' && body.voice.trim() ? body.voice.trim() : null;
       const voice = rawVoice || (dest ? dest.voice : (cfg.tts?.voice || DEFAULT_TTS_VOICE));
-      const voiceOk = dest ? isValidRemoteVoice(voice) : (isKnownVoice(voice) && isValidVoiceId(voice));
+      // `custom:<id>` names a saved voice. It is resolved to an embedding here so
+      // the engine never has to know where voices are stored.
+      const customId = dest ? null : ttsVoices.parseCustomVoice(voice);
+      let speakerEmbedding = null;
+      if (customId) {
+        const rec = ttsVoices.getVoice(customId);
+        if (!rec) return sendJson(res, 404, { error: { message: 'no such saved voice', type: 'bad_voice' } });
+        if (!ttsEngine.supportsCustomVoices() && ttsEngine.isReady()) {
+          return sendJson(res, 409, { error: { message: `the active model (${ttsEngine.arch()}) cannot use a recorded voice — switch to SpeechT5`, type: 'voice_unsupported' } });
+        }
+        speakerEmbedding = rec.vec;
+      }
+      const voiceOk = customId ? true
+        : dest ? isValidRemoteVoice(voice)
+          : (isKnownVoice(voice) && isValidVoiceId(voice));
       if (!voiceOk) return sendJson(res, 400, { error: { message: 'unknown or invalid voice', type: 'bad_voice' } });
       // We synthesize WAV only. Say so rather than returning WAV bytes under an mp3
       // content-type — a client that trusts the header would play noise.
@@ -1073,7 +1148,7 @@ export function createGateway(cfg = loadConfig()) {
           dtype: cfg.tts?.dtype || 'auto',
         });
         if (!ok) return sendJson(res, 503, { error: { message: ttsEngine.health().error || 'tts model not ready', type: 'tts_unavailable' } });
-        const pcm = await ttsEngine.synth(text, { voice, speed });
+        const pcm = await ttsEngine.synth(text, { voice, speed, speakerEmbedding });
         // The ACTIVE model's rate, not the constant: a VITS/MMS model emits 16 kHz
         // and writing it into a 24 kHz header plays it fast and chipmunked.
         const rate = ttsEngine.sampleRate();
