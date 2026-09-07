@@ -196,7 +196,11 @@ test('health() is safe to call before anything is loaded', () => {
 // written into Kokoro's 24 kHz header plays back fast and chipmunked.
 test('the supported architectures are exactly the ones the engine implements', () => {
   const { SUPPORTED_ARCH } = tts;
+  // pocket-tts is NOT here on purpose: SUPPORTED_ARCH maps transformers.js
+  // config.model_type values, and Pocket TTS is raw onnxruntime dispatched by
+  // catalog id instead.
   assert.deepEqual(Object.keys(SUPPORTED_ARCH).sort(), ['speecht5', 'style_text_to_speech_2', 'vits']);
+  assert.equal(tts.POCKET_ARCH, 'pocket-tts');
   assert.equal(SUPPORTED_ARCH.style_text_to_speech_2, 'style-tts2');
   assert.equal(SUPPORTED_ARCH.vits, 'vits');
   assert.equal(SUPPORTED_ARCH.speecht5, 'speecht5');
@@ -210,13 +214,16 @@ test('before anything loads, the defaults are Kokoro-shaped and safe to read', (
 
 test('the catalog declares an arch and a rate for every entry', () => {
   for (const m of TTS_MODEL_CATALOG) {
-    assert.ok(['style-tts2', 'vits', 'speecht5'].includes(m.arch), `${m.id} has arch "${m.arch}"`);
+    assert.ok(['style-tts2', 'vits', 'speecht5', 'pocket-tts'].includes(m.arch), `${m.id} has arch "${m.arch}"`);
     assert.ok(m.sampleRate > 0, `${m.id} must declare its output rate`);
     assert.equal(typeof m.voices, 'boolean', `${m.id} must say whether it has voices`);
     // Built-in voices are a Kokoro thing; a RECORDED voice is a SpeechT5 thing.
     // Nothing may claim both, and only speecht5 may claim the second.
     assert.equal(m.voices, m.arch === 'style-tts2', `${m.id}: only Kokoro has built-in voices`);
-    assert.equal(!!m.customVoices, m.arch === 'speecht5', `${m.id}: only SpeechT5 takes a speaker embedding`);
+    // Two engines can be pointed at a person: Pocket TTS (built for it) and
+    // SpeechT5 (borrows a print from a space it was not trained on).
+    assert.equal(!!m.customVoices, m.arch === 'speecht5' || m.arch === 'pocket-tts',
+      `${m.id}: only the cloning engines take a speaker embedding`);
     assert.ok(!(m.voices && m.customVoices), `${m.id}: a model cannot have both kinds of voice`);
   }
 });

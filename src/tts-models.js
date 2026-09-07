@@ -56,6 +56,26 @@ export const TTS_MODEL_CATALOG = [
     note: 'The Mandarin-tuned Kokoro. Same engine and voice mechanism as v1.0.',
   },
   {
+    // The one model here BUILT for cloning. Its Mimi encoder turns a sample into a
+    // conditioning the model generates from directly, rather than borrowing a
+    // voice print from a space it was not trained on — which is why it reproduces
+    // a speaker where SpeechT5 merely produces a consistent stranger. Also the
+    // fastest: measured 8-9x realtime at int8, against Kokoro's 2.1x.
+    id: 'kyutai/pocket-tts',
+    label: 'Pocket TTS — clone your voice',
+    lang: 'English',
+    tier: 'accurate',
+    arch: 'pocket-tts',
+    bundle: 'english_2026-04',
+    approxMB: 146,
+    ramMB: 700,
+    sampleRate: 24000,
+    voices: false,
+    customVoices: true,
+    recommended: true,
+    note: 'Kyutai Pocket TTS (MIT code, CC-BY-4.0 weights). Records a few seconds and speaks as you. Needs a saved voice; 146 MB one-time download.',
+  },
+  {
     id: 'Xenova/speecht5_tts',
     label: 'SpeechT5 — your own voice',
     lang: 'English',
@@ -135,6 +155,11 @@ export const TTS_VOICES = [
 // piece of work, not a catalog entry — so the seam is here and the engine is not.
 export function ttsModelEngine(id) {
   return ttsModel(id)?.arch || 'style-tts2';
+}
+
+// The bundle a pocket-tts catalog entry uses (its language pack).
+export function ttsModelBundle(id) {
+  return ttsModel(id)?.bundle || null;
 }
 
 // Does this catalog entry have selectable voices? Kokoro picks one from a style

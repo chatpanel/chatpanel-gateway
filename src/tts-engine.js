@@ -24,8 +24,9 @@ import { ensureLib, modelRoot } from './ner-engine.js';
 import { runtimeDtype, runtimeName, DTYPE_SUFFIX } from './model-runtime.js';
 import {
   DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, STYLE_DIM, MAX_PHONEME_TOKENS,
-  ttsModelDtype, isKnownTtsModel, isValidVoiceId, voiceLang,
+  ttsModelDtype, isKnownTtsModel, isValidVoiceId, voiceLang, ttsModelEngine, ttsModel,
 } from './tts-models.js';
+import { bundleOnDisk as pocketBundleOnDisk } from './pocket-tts-engine.js';
 
 // Kokoro's rate. Kept as a named export because it is the default and several
 // callers want a number before anything is loaded — but it is NOT universal: a
@@ -43,6 +44,8 @@ let _progress = null;
 let _initPromise = null;
 let _arch = null;         // 'style-tts2' (Kokoro) | 'vits' (MMS) | 'speecht5' (custom voices)
 let _vocoder = null;      // speecht5 only — mel → waveform
+let _pocket = null;       // pocket-tts only — its own PocketTTS instance
+let _encoder = null;      // a PocketTTS kept ONLY to encode voices, never to speak
 let _rate = SAMPLE_RATE;  // the ACTIVE model's output rate
 const _voices = new Map(); // voice id → Float32Array style bank
 
@@ -51,12 +54,38 @@ const _voices = new Map(); // voice id → Float32Array style bank
 // forward pass with a shape error nobody can act on.
 export const SUPPORTED_ARCH = { style_text_to_speech_2: 'style-tts2', vits: 'vits', speecht5: 'speecht5' };
 
+// Pocket TTS is not a transformers.js model — it is five raw ONNX graphs with a
+// hand-written generation loop, exactly like parakeet on the STT side — so it is
+// dispatched by catalog id rather than by a transformers config.model_type.
+export const POCKET_ARCH = 'pocket-tts';
+
 // SpeechT5 is the only architecture here that takes a SPEAKER EMBEDDING, which is
 // what makes a custom voice possible at all: Kokoro's voices are fixed style banks
 // and VITS is single-speaker, so neither can be pointed at a person. It needs a
 // separate vocoder (mel → waveform), hence the extra model id.
 export const SPEECHT5_VOCODER = 'Xenova/speecht5_hifigan';
-export function supportsCustomVoices() { return _arch === 'speecht5'; }
+// Both engines that can be pointed at a person. Pocket TTS is the one built for
+// it; SpeechT5 is kept because it is small and already downloaded for anyone who
+// tried it, but it borrows a voice rather than reproducing one.
+export function supportsCustomVoices() { return _arch === 'speecht5' || _arch === POCKET_ARCH; }
+export function isPocket() { return _arch === POCKET_ARCH; }
+
+/**
+ * A PocketTTS instance purely for ENCODING a voice, without disturbing whatever
+ * model is currently speaking. Saving a voice has to derive its conditioning while
+ * the sample still exists, and that must not silently switch the active engine out
+ * from under a conversation in progress.
+ */
+export async function pocketForEncoding({ allowDownload = true, log = () => {} } = {}) {
+  if (_pocket) return _pocket;
+  const { PocketTTS, bundleOnDisk, DEFAULT_BUNDLE } = await import('./pocket-tts-engine.js');
+  if (!bundleOnDisk(DEFAULT_BUNDLE) && !allowDownload) return null;
+  if (_encoder) return _encoder;
+  const pt = new PocketTTS();
+  await pt.load(DEFAULT_BUNDLE, { log });
+  _encoder = pt;
+  return pt;
+}
 
 export function arch() { return _arch; }
 export function sampleRate() { return _rate; }
@@ -79,6 +108,11 @@ export function modelDir(modelId) {
 // Present = the EXACT ONNX file this runtime will load, plus the tokenizer. Both
 // non-empty: a truncated download must not read as installed.
 export function modelOnDisk(modelId = _model || DEFAULT_TTS_MODEL, dtype = ttsModelDtype(modelId) || runtimeDtype()) {
+  // Pocket TTS keeps a bundle of five graphs under its own directory, not a single
+  // transformers-style onnx/ folder. bundleOnDisk is a pure fs predicate — the
+  // heavy onnxruntime import inside that module is dynamic — so importing it
+  // statically costs nothing.
+  if (ttsModelEngine(modelId) === POCKET_ARCH) return pocketBundleOnDisk(ttsModel(modelId)?.bundle);
   const dir = modelDir(modelId);
   const suffix = DTYPE_SUFFIX[dtype] ?? '';
   const need = [join(dir, 'onnx', `model${suffix}.onnx`), join(dir, 'tokenizer.json')];
@@ -104,6 +138,10 @@ export function init(cfg = {}) {
 }
 
 async function loadModel(modelId, { log = () => {}, allowDownload = true, dtype: dtypeOverride = null } = {}) {
+  // Pocket TTS has its own loader (raw onnxruntime, its own bundle layout), so it
+  // is routed before any transformers.js machinery is touched.
+  if (ttsModelEngine(modelId) === POCKET_ARCH) return loadPocket(modelId, { log, allowDownload });
+
   const prevNet = _net, prevModel = _model;
   let lib;
   try {
@@ -187,6 +225,36 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true, dtype:
     return false;
   } finally {
     try { lib.env.remoteHost = prevHost; } catch { /* optional */ }
+  }
+}
+
+async function loadPocket(modelId, { log = () => {}, allowDownload = true } = {}) {
+  const prevArch = _arch, prevPocket = _pocket, prevModel = _model;
+  const { PocketTTS, bundleOnDisk, DEFAULT_BUNDLE, SAMPLE_RATE: PR } = await import('./pocket-tts-engine.js');
+  const bundle = ttsModel(modelId)?.bundle || DEFAULT_BUNDLE;
+  if (!bundleOnDisk(bundle) && !allowDownload) {
+    _state = 'error'; _err = 'model not on disk and downloads disabled';
+    return false;
+  }
+  _state = bundleOnDisk(bundle) ? 'loading' : 'downloading';
+  if (_state === 'downloading') _progress = { model: modelId, file: null, pct: 0 };
+  try {
+    const pt = new PocketTTS();
+    await pt.load(bundle, {
+      log,
+      onProgress: ({ file, pct }) => { _progress = { model: modelId, file, pct }; },
+    });
+    _pocket = pt; _net = pt; _tok = null; _vocoder = null;
+    _model = modelId; _arch = POCKET_ARCH; _dtype = 'int8'; _rate = PR;
+    _state = 'ready'; _err = null; _progress = null;
+    return true;
+  } catch (e) {
+    // A failed switch keeps whatever was working, same as every other engine here.
+    _pocket = prevPocket; _arch = prevArch; _model = prevModel;
+    _state = prevPocket || _net ? 'ready' : 'error';
+    _err = e.message; _progress = null;
+    log(`[pocket-tts] load failed (${e.message})`);
+    return false;
   }
 }
 
@@ -288,6 +356,15 @@ export async function synthChunk(text, { voice = DEFAULT_TTS_VOICE, speed = 1, s
     return out.waveform.data;
   }
 
+  // Pocket TTS runs its own generation loop and chunking, so a whole utterance is
+  // handed over at once rather than being pre-split here.
+  if (_arch === POCKET_ARCH) {
+    if (!speakerEmbedding?.data?.length) {
+      throw new Error('this model needs a saved voice — record one in Settings → Text-to-speech');
+    }
+    return _pocket.synth(String(text), { voice: speakerEmbedding });
+  }
+
   // SpeechT5: conditioned by a 512-d speaker embedding, which is the whole point —
   // it is the one architecture here that can be pointed at a person's voice.
   // Without an embedding there is no voice to speak in, so this refuses rather
@@ -324,6 +401,9 @@ export async function synthChunk(text, { voice = DEFAULT_TTS_VOICE, speed = 1, s
 
 /** Synthesize arbitrary-length text, chunk by chunk. `onChunk` sees each as it lands. */
 export async function synth(text, { voice = DEFAULT_TTS_VOICE, speed = 1, speakerEmbedding = null, onChunk = null } = {}) {
+  // Pocket TTS splits internally against its own token ceiling, so splitting again
+  // here would cut sentences twice and reset its state mid-thought.
+  if (_arch === POCKET_ARCH) return synthChunk(text, { voice, speed, speakerEmbedding });
   const chunks = splitSentences(text);
   const out = [];
   for (const c of chunks) {
@@ -366,6 +446,6 @@ export function toWav(pcm, sampleRate = SAMPLE_RATE) {
 
 export function _reset() {
   _state = 'off'; _model = null; _net = null; _tok = null; _dtype = null;
-  _err = null; _progress = null; _initPromise = null; _arch = null; _rate = SAMPLE_RATE; _vocoder = null;
+  _err = null; _progress = null; _initPromise = null; _arch = null; _rate = SAMPLE_RATE; _vocoder = null; _pocket = null; _encoder = null;
   _voices.clear();
 }

@@ -53,7 +53,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.55';
+export const VERSION = '0.6.56';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -461,6 +461,23 @@ export function joinUpstream(base, pathname, search = '') {
 // enough to cover loading one already on disk (seconds) plus a slow first fetch,
 // short enough that a stuck download does not hold a request open forever.
 const EMBEDDER_WAIT_MS = 90_000;
+
+// Linear resample. Good enough for a voice-print sample — the encoder cares about
+// timbre, not the last decibel of fidelity — and it avoids a dependency for one
+// rate conversion.
+function resample(input, from, to) {
+  if (from === to) return input;
+  const ratio = from / to;
+  const out = new Float32Array(Math.floor(input.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const pos = i * ratio;
+    const a = Math.floor(pos);
+    const b = Math.min(input.length - 1, a + 1);
+    const f = pos - a;
+    out[i] = input[a] * (1 - f) + input[b] * f;
+  }
+  return out;
+}
 
 const LOCAL_NAMESPACES = ['/tts', '/stt', '/ner', '/diarize', '/skills', '/config', '/logs', '/status', '/admin'];
 
@@ -1110,9 +1127,25 @@ export function createGateway(cfg = loadConfig()) {
               });
             }
           }
-          const vec = await diarizeEngine.embed(Float32Array.from(pcm));
-          const saved = ttsVoices.saveVoice({ name, vec });
-          console.log(`[tts] saved custom voice "${saved.name}" (${saved.dim}-d, sample discarded)`);
+          const audio = Float32Array.from(pcm);
+          const vec = await diarizeEngine.embed(audio);
+
+          // A voice print is engine-specific and the SAMPLE is about to be thrown
+          // away, so anything this voice might later need must be derived now.
+          // Pocket TTS is the engine that actually reproduces a speaker, so its
+          // conditioning is computed whenever its bundle is present — failing that
+          // is not fatal, it just means this voice works only with SpeechT5.
+          let pocket = null;
+          try {
+            const pt = await ttsEngine.pocketForEncoding({ allowDownload: cfg.tts?.allowDownload !== false, log: (m) => console.log(m) });
+            // The recorder sends 16 kHz; Mimi wants 24 kHz.
+            if (pt) pocket = await pt.encodeVoice(resample(audio, 16000, 24000));
+          } catch (e) {
+            console.log(`[tts] pocket conditioning unavailable for this voice (${e.message})`);
+          }
+
+          const saved = ttsVoices.saveVoice({ name, vec, pocket });
+          console.log(`[tts] saved custom voice "${saved.name}" (${saved.kinds.join(' + ')}, sample discarded)`);
           return sendJson(res, 201, { ...saved, usable: ttsEngine.supportsCustomVoices() });
         } catch (e) {
           return sendJson(res, 400, { error: { message: e.message, type: 'save_failed' } });
@@ -1225,7 +1258,23 @@ export function createGateway(cfg = loadConfig()) {
               },
             });
           }
-          speakerEmbedding = rec.vec;
+          // Which print to hand over depends on the engine: Pocket TTS takes its
+          // Mimi conditioning, SpeechT5 the 512-d x-vector. A voice saved before
+          // the pocket bundle existed has only the latter.
+          if (ttsEngine.isPocket()) {
+            const pk = ttsVoices.getPocketVoice(customId);
+            if (!pk) {
+              return sendJson(res, 409, {
+                error: {
+                  message: 'this voice was saved without a Pocket TTS conditioning — record it again with Pocket TTS selected',
+                  type: 'voice_kind_missing',
+                },
+              });
+            }
+            speakerEmbedding = pk;
+          } else {
+            speakerEmbedding = rec.vec;
+          }
           useVoice = `custom:${customId}`;
         } else if (customId) {
           // Explicitly asked for a recorded voice this model cannot use — say so.

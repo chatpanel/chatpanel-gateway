@@ -32,7 +32,9 @@ test('the listing carries no vectors', () => {
   assert.ok(list.length >= 1);
   for (const item of list) {
     assert.ok(!('vec' in item), 'a voice print must not appear in a listing');
-    assert.deepEqual(Object.keys(item).sort(), ['createdAt', 'dim', 'id', 'name']);
+    // `kinds` says WHICH engines can speak as this voice; it carries no vector.
+    assert.deepEqual(Object.keys(item).sort(), ['createdAt', 'dim', 'id', 'kinds', 'name']);
+    assert.ok(Array.isArray(item.kinds) && item.kinds.length >= 1);
   }
 });
 
