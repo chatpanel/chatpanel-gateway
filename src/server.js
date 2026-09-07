@@ -40,7 +40,7 @@ import * as diarizeEngine from './diarize-engine.js';
 import { MODEL_CATALOG, isKnownModel, isValidCustomModelId } from './models.js';
 import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MODEL, STT_DTYPES, isValidDtype } from './stt-models.js';
 import * as ttsEngine from './tts-engine.js';
-import { TTS_MODEL_CATALOG, TTS_VOICES, isKnownTtsModel, isValidCustomTtsId, isKnownVoice, isValidVoiceId, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, TTS_DTYPES, isValidTtsDtype, MAX_TTS_CHARS } from './tts-models.js';
+import { TTS_MODEL_CATALOG, TTS_VOICES, isKnownTtsModel, isValidCustomTtsId, isKnownVoice, isValidVoiceId, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, TTS_DTYPES, isValidTtsDtype, MAX_TTS_CHARS, ttsModelHasCustomVoices } from './tts-models.js';
 import { ttsDestination, synthesizeRemote, isValidRemoteVoice } from './tts-remote.js';
 import * as ttsVoices from './tts-voices.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
@@ -53,7 +53,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.54';
+export const VERSION = '0.6.55';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -1030,6 +1030,26 @@ export function createGateway(cfg = loadConfig()) {
         if (!cfg.tts) cfg.tts = { enabled: true, model: DEFAULT_TTS_MODEL, voice: DEFAULT_TTS_VOICE, allowDownload: true };
         if (id) cfg.tts.model = id;
         if (voice) cfg.tts.voice = voice;
+        // Switching model must revalidate the voice, or the config ends up naming a
+        // Kokoro voice for SpeechT5 (which then has nothing to speak in) or a
+        // recorded voice for Kokoro (which cannot use one). Both states look like
+        // "text-to-speech is broken" from the outside, and both are reachable with
+        // two clicks. Only rewrite when the CURRENT voice cannot work for the new
+        // model — never override a voice the caller just set.
+        if (id && !voice) {
+          const wantsCustom = ttsModelHasCustomVoices(id);
+          // "Is it a custom voice" is not enough — it must be one that still
+          // EXISTS. A config naming a deleted voice is exactly the state that made
+          // every later request fail with "no such saved voice".
+          const curId = ttsVoices.parseCustomVoice(cfg.tts.voice || '');
+          const isCustom = !!(curId && ttsVoices.getVoice(curId));
+          if (wantsCustom && !isCustom) {
+            const saved = ttsVoices.listVoices();
+            cfg.tts.voice = saved.length ? `custom:${saved[0].id}` : '';
+          } else if (!wantsCustom && isCustom) {
+            cfg.tts.voice = DEFAULT_TTS_VOICE;
+          }
+        }
         if (dtype) cfg.tts.dtype = dtype === 'auto' ? null : dtype;
         try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
         if (id) ttsEngine.setModel(id, { onLog: (m) => console.log(m), dtype: dtype || cfg.tts.dtype || 'auto' });
@@ -1101,7 +1121,16 @@ export function createGateway(cfg = loadConfig()) {
       if (req.method === 'DELETE') {
         const id = url.searchParams.get('id') || '';
         // Deleting someone's voice print is not a soft delete — the file is gone.
-        return sendJson(res, 200, { deleted: ttsVoices.deleteVoice(id) });
+        const deleted = ttsVoices.deleteVoice(id);
+        // …and the config must not keep NAMING it. A stored voice that no longer
+        // exists makes every later request fail with "no such saved voice", which
+        // is a confusing way to be told "you deleted that one".
+        if (deleted && cfg.tts?.voice === `custom:${id}`) {
+          const left = ttsVoices.listVoices();
+          cfg.tts.voice = left.length ? `custom:${left[0].id}` : DEFAULT_TTS_VOICE;
+          try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
+        }
+        return sendJson(res, 200, { deleted, voice: cfg.tts?.voice });
       }
     }
 
@@ -1128,32 +1157,12 @@ export function createGateway(cfg = loadConfig()) {
       // not a Kokoro one), so the local catalog check would reject every valid id.
       const rawVoice = body && typeof body.voice === 'string' && body.voice.trim() ? body.voice.trim() : null;
       const voice = rawVoice || (dest ? dest.voice : (cfg.tts?.voice || DEFAULT_TTS_VOICE));
-      // `custom:<id>` names a saved voice. It is resolved to an embedding here so
-      // the engine never has to know where voices are stored.
-      let customId = dest ? null : ttsVoices.parseCustomVoice(voice);
-      // The active model may REQUIRE an embedding while the configured voice still
-      // names a built-in one — switching to SpeechT5 does not rewrite `voice`, and
-      // a client that never sends one inherits whatever was there. Rather than
-      // failing with "record a voice" at someone who already has, fall back to the
-      // most recent saved voice. Erroring is right only when there is genuinely
-      // none to use.
-      if (!dest && !customId && ttsEngine.supportsCustomVoices()) {
-        const saved = ttsVoices.listVoices();
-        if (saved.length) customId = saved[0].id;
+      // A REMOTE destination has its own voice namespace, so it is validated here;
+      // local voices cannot be resolved until the model is loaded, because which
+      // KIND of voice is valid depends on the architecture. See below.
+      if (dest && !isValidRemoteVoice(voice)) {
+        return sendJson(res, 400, { error: { message: 'unknown or invalid voice', type: 'bad_voice' } });
       }
-      let speakerEmbedding = null;
-      if (customId) {
-        const rec = ttsVoices.getVoice(customId);
-        if (!rec) return sendJson(res, 404, { error: { message: 'no such saved voice', type: 'bad_voice' } });
-        if (!ttsEngine.supportsCustomVoices() && ttsEngine.isReady()) {
-          return sendJson(res, 409, { error: { message: `the active model (${ttsEngine.arch()}) cannot use a recorded voice — switch to SpeechT5`, type: 'voice_unsupported' } });
-        }
-        speakerEmbedding = rec.vec;
-      }
-      const voiceOk = customId ? true
-        : dest ? isValidRemoteVoice(voice)
-          : (isKnownVoice(voice) && isValidVoiceId(voice));
-      if (!voiceOk) return sendJson(res, 400, { error: { message: 'unknown or invalid voice', type: 'bad_voice' } });
       // We synthesize WAV only. Say so rather than returning WAV bytes under an mp3
       // content-type — a client that trusts the header would play noise.
       const fmt = body && typeof body.response_format === 'string' ? body.response_format.toLowerCase() : 'wav';
@@ -1188,7 +1197,52 @@ export function createGateway(cfg = loadConfig()) {
           dtype: cfg.tts?.dtype || 'auto',
         });
         if (!ok) return sendJson(res, 503, { error: { message: ttsEngine.health().error || 'tts model not ready', type: 'tts_unavailable' } });
-        const pcm = await ttsEngine.synth(text, { voice, speed, speakerEmbedding });
+        // Voices are resolved AFTER the model is up, because what counts as a valid
+        // voice is a property of the architecture: Kokoro takes a style-bank name,
+        // SpeechT5 takes a recorded embedding, VITS takes neither. Resolving first
+        // meant a `custom:` voice could reach a freshly-loaded Kokoro and fail deep
+        // in the engine with "invalid voice id".
+        let useVoice = voice;
+        let speakerEmbedding = null;
+        let customId = ttsVoices.parseCustomVoice(voice);
+
+        if (ttsEngine.supportsCustomVoices()) {
+          // This model speaks ONLY in a recorded voice. If the configured one names
+          // a built-in (switching model does not rewrite `voice`) or points at a
+          // voice since deleted, fall back to the most recent saved one — the
+          // caller asked to be spoken to, not for that exact voice. A voice named
+          // EXPLICITLY in the request still fails loudly.
+          let rec = customId ? ttsVoices.getVoice(customId) : null;
+          if (!rec && !rawVoice) {
+            const saved = ttsVoices.listVoices();
+            if (saved.length) { customId = saved[0].id; rec = ttsVoices.getVoice(customId); }
+          }
+          if (!rec) {
+            return sendJson(res, customId ? 404 : 400, {
+              error: {
+                message: customId ? 'no such saved voice' : 'this model speaks in a voice you record — add one in Settings → Text-to-speech',
+                type: 'bad_voice',
+              },
+            });
+          }
+          speakerEmbedding = rec.vec;
+          useVoice = `custom:${customId}`;
+        } else if (customId) {
+          // Explicitly asked for a recorded voice this model cannot use — say so.
+          // Inherited from config, though, it is just a stale setting, and refusing
+          // to speak at all is a worse answer than speaking in the default voice.
+          if (rawVoice) {
+            return sendJson(res, 409, {
+              error: { message: `the active model (${ttsEngine.arch()}) cannot use a recorded voice — switch to SpeechT5`, type: 'voice_unsupported' },
+            });
+          }
+          customId = null;
+          useVoice = DEFAULT_TTS_VOICE;
+        } else if (ttsEngine.supportsVoices() && !(isKnownVoice(useVoice) && isValidVoiceId(useVoice))) {
+          return sendJson(res, 400, { error: { message: 'unknown or invalid voice', type: 'bad_voice' } });
+        }
+
+        const pcm = await ttsEngine.synth(text, { voice: useVoice, speed, speakerEmbedding });
         // The ACTIVE model's rate, not the constant: a VITS/MMS model emits 16 kHz
         // and writing it into a 24 kHz header plays it fast and chipmunked.
         const rate = ttsEngine.sampleRate();
