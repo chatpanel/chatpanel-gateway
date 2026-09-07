@@ -40,8 +40,9 @@ export function getOrt() {
       const mod = await import('onnxruntime-node');
       return mod.InferenceSession ? mod : (mod.default || mod);
     }
-    // Say what is actually wrong. The alternative is ORT's own message, which
-    // describes a failed fetch and sends people looking for a corrupt download.
+
+    // Say what is actually wrong. ORT's own message describes a failed fetch and
+    // sends people looking for a corrupt download.
     throw new Error(
       'this model needs the native onnxruntime, which the standalone binary does not carry — '
       + 'install the npm gateway instead (npm i -g @chatpanel/gateway), or pick a model that runs on the bundled runtime',
