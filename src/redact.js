@@ -9,6 +9,8 @@
 // extension's pii-pipeline.)
 
 import { createVault, redactText, detectEntities, gatedDictionary, sanitizeUnicode } from '@chatpanel/pii';
+import { ENTITIES_SCHEMA, entitiesFormat } from './extraction.js';
+import { describeSchema, coerce } from './structured.js';
 import * as engine from './ner-engine.js';
 
 // tier: 'basic' | 'full'. For 'full' we run the local detector over the combined
@@ -18,7 +20,7 @@ import * as engine from './ner-engine.js';
 // quality — free requests get the full tier (names/orgs via NER) within their
 // allowance. The custom dictionary is capped for free: gatedDictionary limits it
 // to FREE_DICT_LIMIT via the shared chatpanel-pii gate.
-export async function redactSegments(segments, redactionCfg, { signal, isPro = true } = {}) {
+export async function redactSegments(segments, redactionCfg, { signal, isPro = true, onEgress = null, fetchImpl: fetchOverride = null } = {}) {
   const vault = createVault();
 
   // De-steganography FIRST (before detection). Invisible/format Unicode is a triple
@@ -61,9 +63,29 @@ export async function redactSegments(segments, redactionCfg, { signal, isPro = t
     const detection = useEngine
       ? { backend: 'endpoint', url: 'inproc:ner', timeoutMs: 30000, maxChars: 8000, types: det?.types }
       : { ...det, timeoutMs: Math.max(Number(det.timeoutMs) || 0, 30000) };
-    const fetchImpl = useEngine ? engine.fetchAdapter : undefined;
+    // The in-process engine is already injected this way; `fetchOverride` is the same seam
+    // for a test, so the detector hop can be exercised without a network. Never used in
+    // production — nothing passes it but tests.
+    const fetchImpl = useEngine ? engine.fetchAdapter : (fetchOverride || undefined);
     try {
-      entities = await detectEntities(texts.join('\n\n'), { detection }, { signal, fetchImpl });
+      entities = await detectEntities(texts.join('\n\n'), { detection }, {
+        signal,
+        fetchImpl,
+        // The one call that sends RAW, pre-redaction text somewhere. In-process NER never
+        // leaves the machine (`inproc:ner`), but a configured detector URL can be any public
+        // host — so the FACT of it is recorded, never the text. See @chatpanel/pii.
+        onEgress: useEngine ? null : onEgress,
+        // @chatpanel/pii ships zero dependencies, so the structured-output layer is handed IN.
+        // What it buys: the detector asks an OpenAI-compatible server to ENFORCE the shape
+        // (json_schema, then json_object, then nothing), and reads the reply with the
+        // schema-aligned coercer instead of a slice between the first '{' and the last '}'.
+        // A locally-served small model is exactly the case that needed it.
+        structured: {
+          block: describeSchema(ENTITIES_SCHEMA),
+          format: (mode) => entitiesFormat(mode),
+          parse: (text) => coerce(text, ENTITIES_SCHEMA)?.value ?? null,
+        },
+      });
     } catch {
       entities = [];
     }

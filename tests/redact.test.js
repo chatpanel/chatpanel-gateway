@@ -94,3 +94,46 @@ test('restoreDeep walks tool-call argument objects', async () => {
   assert.equal(restored.query, 'lookup alex@example.com');
   assert.equal(restored.nested.v[0], 'alex@example.com');
 });
+
+// ── The un-redacted egress is recorded ───────────────────────────────────────────
+//
+// Detection is the ONE hop that sees a request BEFORE redaction — you cannot redact until you
+// have detected — and a configured detector URL may be any public host, not just loopback. It
+// is SSRF-guarded, but it was logged nowhere, so "what left my machine" had no answer for it.
+// These assert the two halves that matter: that it IS reported, and that the report cannot
+// itself become the leak.
+test('a detector call reports its egress, carrying no request content', async () => {
+  const seen = [];
+  const body = { messages: [{ role: 'user', content: 'Alex Rivera at Example Corp, alex@example.com' }] };
+  const segs = openai.collectSegments(body, { redactSystem: true });
+  const fetchImpl = async () => ({
+    ok: true,
+    json: async () => ({ choices: [{ message: { content: '{"entities":[{"value":"Alex Rivera","type":"PERSON"}]}' } }] }),
+  });
+  const { count } = await redactSegments(segs, {
+    tier: 'full',
+    dictionary: [],
+    detection: { backend: 'openai', url: 'https://detector.example.com/v1?key=SECRETKEY', model: 'small', types: {} },
+  }, { onEgress: (e) => seen.push(e), fetchImpl });
+
+  assert.ok(count >= 1, 'redaction still happened');
+  assert.equal(seen.length, 1, 'the detector hop was not reported');
+  assert.equal(seen[0].backend, 'openai');
+  // The HOST, never the URL — a detector URL can carry a key in its query string.
+  assert.equal(seen[0].host, 'detector.example.com');
+  assert.equal(seen[0].ok, true);
+  const dump = JSON.stringify(seen[0]);
+  for (const secret of ['Alex Rivera', 'Example Corp', 'alex@example.com', 'SECRETKEY']) {
+    assert.equal(dump.includes(secret), false, `the egress record leaked ${secret}`);
+  }
+});
+
+test('the in-process detector reports nothing — it never leaves the machine', async () => {
+  // `inproc:ner` is a loopback shim, not an egress. Logging it as one would train the user to
+  // ignore the entries that DO mean their text went somewhere.
+  const seen = [];
+  const body = { messages: [{ role: 'user', content: 'email alex@example.com' }] };
+  const segs = openai.collectSegments(body, { redactSystem: true });
+  await redactSegments(segs, { tier: 'full', dictionary: [] }, { onEgress: (e) => seen.push(e) });
+  assert.deepEqual(seen, []);
+});

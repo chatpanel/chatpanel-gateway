@@ -49,7 +49,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.47';
+export const VERSION = '0.6.48';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -1141,7 +1141,21 @@ export function createGateway(cfg = loadConfig()) {
         // Redact at the configured tier for everyone (free users get name/org
         // redaction within their allowance); the custom dictionary stays capped for
         // free (isPro decides that inside).
-        const { vault: v, count, sanitized } = await redactSegments(segs, cfg.redaction, { signal: ac.signal, isPro });
+        const { vault: v, count, sanitized } = await redactSegments(segs, cfg.redaction, {
+          signal: ac.signal,
+          isPro,
+          // A detector is the only hop that sees the request BEFORE redaction. It is guarded
+          // (SSRF) but was not visible: /v1/observability/access is where a user answers
+          // "what left my machine", and this was the one thing missing from it.
+          onEgress: (e) => accessLog.push(makeAccessEvent({
+            ts: Date.now(),
+            client: 'redaction',
+            tool: `detect:${e.backend}@${e.host || 'local'}`,
+            ok: e.ok,
+            ms: e.ms,
+            error: e.error,
+          })),
+        });
         if (trace) trace.lap('redact', rd0);
         vault = v;
         redactedCount = count;
