@@ -75,7 +75,7 @@ export function listVoices() {
       // in a settings page's JSON.
       if (v?.id && v?.name) {
         out.push({
-          id: v.id, name: v.name, createdAt: v.createdAt || 0, dim: v.vec?.length || 0,
+          id: v.id, name: v.name, createdAt: v.createdAt || 0, updatedAt: v.updatedAt || 0, dim: v.vec?.length || 0,
           kinds: v.pocketShape ? [KIND_SPEECHT5, KIND_POCKET] : [KIND_SPEECHT5],
         });
       }
@@ -131,6 +131,53 @@ export function saveVoice({ name, vec, pocket = null }) {
   }
   writeFileSync(fileFor(rec.id), JSON.stringify(rec));
   return { id: rec.id, name: rec.name, createdAt: rec.createdAt, dim: rec.vec.length, kinds: rec.pocketShape ? [KIND_SPEECHT5, KIND_POCKET] : [KIND_SPEECHT5] };
+}
+
+/**
+ * Rename in place. The id is untouched on purpose: `custom:<id>` is what the
+ * gateway config and every client store, so a rename must not invalidate them.
+ */
+export function renameVoice(id, name) {
+  const rec = getVoice(id);
+  if (!rec) return null;
+  const clean = String(name || '').trim().slice(0, MAX_NAME);
+  if (!clean) throw new Error('a name is required');
+  rec.name = clean;
+  rec.updatedAt = Date.now();
+  writeFileSync(fileFor(id), JSON.stringify(rec));
+  return { id, name: rec.name, createdAt: rec.createdAt || 0, updatedAt: rec.updatedAt, dim: rec.vec?.length || 0 };
+}
+
+/**
+ * Re-record: swap in prints derived from a NEW sample, keeping the id and name.
+ *
+ * Keeping the id is the whole point. A first take is often poor — too quiet, a
+ * cough, the wrong room — and the fix should be "record that again", not "delete
+ * it, record a new one, and go re-select it everywhere". Anything already pointing
+ * at this voice keeps working and simply sounds different.
+ */
+export function replaceVoice(id, { vec, pocket = null }) {
+  const rec = getVoice(id);
+  if (!rec) return null;
+  if (!vec || vec.length !== EMBED_DIM) throw new Error(`expected a ${EMBED_DIM}-value embedding, got ${vec?.length || 0}`);
+  rec.vec = Array.from(vec, (x) => Number(x) || 0);
+  rec.updatedAt = Date.now();
+  if (pocket?.data?.length && Array.isArray(pocket.shape)) {
+    rec.pocketShape = pocket.shape;
+    const f32 = pocket.data instanceof Float32Array ? pocket.data : Float32Array.from(pocket.data);
+    writeFileSync(pocketFileFor(id), Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength));
+  } else if (rec.pocketShape) {
+    // The new take produced no Pocket conditioning (its bundle is missing), so the
+    // OLD one must go — leaving it would pair a stale voice with a fresh print and
+    // the voice would change depending on which engine spoke.
+    delete rec.pocketShape;
+    rmSync(pocketFileFor(id), { force: true });
+  }
+  writeFileSync(fileFor(id), JSON.stringify(rec));
+  return {
+    id, name: rec.name, createdAt: rec.createdAt || 0, updatedAt: rec.updatedAt,
+    dim: rec.vec.length, kinds: rec.pocketShape ? [KIND_SPEECHT5, KIND_POCKET] : [KIND_SPEECHT5],
+  };
 }
 
 /** Remove one permanently. Returns whether there was anything to remove. */

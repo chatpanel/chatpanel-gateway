@@ -54,7 +54,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.57';
+export const VERSION = '0.6.58';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -1117,7 +1117,26 @@ export function createGateway(cfg = loadConfig()) {
         try { body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')); } catch { body = null; }
         const name = body && typeof body.name === 'string' ? body.name.trim() : '';
         const pcm = body && Array.isArray(body.pcm) ? body.pcm : null;
-        if (!name) return sendJson(res, 400, { error: { message: 'a name is required', type: 'bad_request' } });
+        // An `id` means UPDATE an existing voice rather than create one. The id is
+        // preserved either way, because `custom:<id>` is what the config and every
+        // client hold — a rename or a re-record must not orphan those.
+        const editId = body && typeof body.id === 'string' ? body.id.trim() : '';
+        if (editId) {
+          if (!ttsVoices.getVoice(editId)) return sendJson(res, 404, { error: { message: 'no such saved voice', type: 'bad_voice' } });
+          // Rename only — no new audio, so the prints are left exactly as they are.
+          if (!pcm) {
+            if (!name) return sendJson(res, 400, { error: { message: 'a name is required', type: 'bad_request' } });
+            try {
+              return sendJson(res, 200, { ...ttsVoices.renameVoice(editId, name), usable: ttsEngine.supportsCustomVoices() });
+            } catch (e) { return sendJson(res, 400, { error: { message: e.message, type: 'rename_failed' } }); }
+          }
+          // Re-record: same rules as a fresh take, then swap the prints in place.
+          if (pcm.length < 16000) {
+            return sendJson(res, 400, { error: { message: 'need at least 1 second of 16 kHz mono audio', type: 'sample_too_short' } });
+          }
+        } else if (!name) {
+          return sendJson(res, 400, { error: { message: 'a name is required', type: 'bad_request' } });
+        }
         if (!pcm || pcm.length < 16000) {
           // Under a second of audio produces an embedding dominated by whatever
           // noise happened to be in it, and the resulting voice is arbitrary.
@@ -1166,9 +1185,13 @@ export function createGateway(cfg = loadConfig()) {
             console.log(`[tts] pocket conditioning unavailable for this voice (${e.message})`);
           }
 
-          const saved = ttsVoices.saveVoice({ name, vec, pocket });
-          console.log(`[tts] saved custom voice "${saved.name}" (${saved.kinds.join(' + ')}, sample discarded)`);
-          return sendJson(res, 201, { ...saved, usable: ttsEngine.supportsCustomVoices() });
+          const saved = editId
+            ? ttsVoices.replaceVoice(editId, { vec, pocket })
+            : ttsVoices.saveVoice({ name, vec, pocket });
+          // A rename may ride along with a re-record, so apply it after the swap.
+          const final = editId && name && name !== saved.name ? ttsVoices.renameVoice(editId, name) : saved;
+          console.log(`[tts] ${editId ? 're-recorded' : 'saved'} custom voice "${final.name}" (${(saved.kinds || []).join(' + ')}, sample discarded)`);
+          return sendJson(res, editId ? 200 : 201, { ...saved, ...final, usable: ttsEngine.supportsCustomVoices() });
         } catch (e) {
           return sendJson(res, 400, { error: { message: e.message, type: 'save_failed' } });
         }
