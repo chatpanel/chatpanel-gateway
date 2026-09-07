@@ -18,9 +18,15 @@ import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import os from 'node:os';
 
-// The six read-only tools the ChatPanel MCP server exposes (history + skills). Named here so
-// the Codex approval blocks stay in step with what the server actually advertises.
-const TOOLS = ['search_history', 'get_record', 'find_related', 'list_history', 'list_skills', 'open_skill', 'read_skill_file'];
+// The READ-ONLY tools the ChatPanel MCP server exposes (history, memory, skills). Named here
+// so the Codex approval blocks stay in step with what the server actually advertises.
+// `remember` and `forget` are deliberately absent: they WRITE to the user's memory store, and
+// pre-approving a write without the user seeing it once is not ours to decide.
+const TOOLS = [
+  'smart_search', 'search_history', 'get_record', 'find_related', 'list_history',
+  'recall',
+  'list_skills', 'open_skill', 'read_skill_file',
+];
 
 // Resolve the command a config should launch. A bare name works when the client inherits a
 // normal PATH; an absolute path is the safe fallback when it does not.
