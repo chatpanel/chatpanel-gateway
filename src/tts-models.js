@@ -40,7 +40,36 @@ export const TTS_MODEL_CATALOG = [
     approxMB: 330,  // fp32 on WASM; ~90 on native q8
     ramMB: 600,
     sampleRate: 24000,
+    voices: true,
     note: 'Apache-2.0, 82M params. Natural voices at ~5× realtime on CPU. The default.',
+  },
+  {
+    id: 'onnx-community/Kokoro-82M-v1.1-zh-ONNX',
+    label: 'Kokoro 82M (v1.1, Chinese)',
+    lang: 'Chinese + English',
+    tier: 'balanced',
+    arch: 'style-tts2',
+    approxMB: 330,
+    ramMB: 600,
+    sampleRate: 24000,
+    voices: true,
+    note: 'The Mandarin-tuned Kokoro. Same engine and voice mechanism as v1.0.',
+  },
+  {
+    // One MMS entry so the second architecture is DISCOVERABLE from the list rather
+    // than only findable by search. The rest of the family (~1000 languages) is
+    // exactly what the search box is for — listing them all here would be a menu,
+    // not a catalog.
+    id: 'Xenova/mms-tts-hin',
+    label: 'MMS TTS — Hindi',
+    lang: 'Hindi (हिन्दी)',
+    tier: 'light',
+    arch: 'vits',
+    approxMB: 40,
+    ramMB: 200,
+    sampleRate: 16000,
+    voices: false,
+    note: 'Tiny single-speaker VITS. Meta\u2019s MMS covers ~1000 languages — search "mms-tts" for yours.',
   },
 ];
 
@@ -84,7 +113,14 @@ export const TTS_VOICES = [
 // THIRD-PARTY re-export of a gated checkpoint. That is a parakeet-engine-sized
 // piece of work, not a catalog entry — so the seam is here and the engine is not.
 export function ttsModelEngine(id) {
-  return ttsModel(id)?.engine || 'style-tts2';
+  return ttsModel(id)?.arch || 'style-tts2';
+}
+
+// Does this catalog entry have selectable voices? Kokoro picks one from a style
+// bank; VITS/MMS is single-speaker. Unknown (a searched model) resolves at load.
+export function ttsModelHasVoices(id) {
+  const m = ttsModel(id);
+  return m ? m.voices !== false : true;
 }
 
 export function ttsModel(id) {

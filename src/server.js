@@ -52,7 +52,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.51';
+export const VERSION = '0.6.52';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -981,8 +981,13 @@ export function createGateway(cfg = loadConfig()) {
           progress: ttsEngine.progress(),
           available,
           voice: cfg.tts?.voice || DEFAULT_TTS_VOICE,
-          // Each voice is a separate ~500 KB style bank, so `installed` is per-voice.
-          voices: TTS_VOICES.map((v) => ({ ...v, installed: ttsEngine.voiceOnDisk(v.id, active) })),
+          // Architecture decides whether voices mean anything: Kokoro picks one from
+          // a style bank, VITS/MMS is single-speaker. An empty list tells the UI to
+          // hide the picker rather than offer choices that cannot take effect.
+          arch: ttsEngine.arch(),
+          supportsVoices: ttsEngine.supportsVoices(),
+          sampleRate: ttsEngine.sampleRate(),
+          voices: ttsEngine.arch() === 'vits' ? [] : TTS_VOICES.map((v) => ({ ...v, installed: ttsEngine.voiceOnDisk(v.id, active) })),
           dtype: cfg.tts?.dtype || 'auto',
           loadedDtype: ttsEngine.health().dtype,
           runtime: ttsEngine.health().runtime,
@@ -1069,12 +1074,15 @@ export function createGateway(cfg = loadConfig()) {
         });
         if (!ok) return sendJson(res, 503, { error: { message: ttsEngine.health().error || 'tts model not ready', type: 'tts_unavailable' } });
         const pcm = await ttsEngine.synth(text, { voice, speed });
-        const out = fmt === 'pcm' ? Buffer.from(new Float32Array(pcm).buffer) : ttsEngine.toWav(pcm);
+        // The ACTIVE model's rate, not the constant: a VITS/MMS model emits 16 kHz
+        // and writing it into a 24 kHz header plays it fast and chipmunked.
+        const rate = ttsEngine.sampleRate();
+        const out = fmt === 'pcm' ? Buffer.from(new Float32Array(pcm).buffer) : ttsEngine.toWav(pcm, rate);
         res.writeHead(200, {
           'Content-Type': fmt === 'pcm' ? 'application/octet-stream' : 'audio/wav',
           'Content-Length': String(out.length),
           'Cache-Control': 'no-store',
-          'X-Tts-Sample-Rate': String(ttsEngine.SAMPLE_RATE),
+          'X-Tts-Sample-Rate': String(rate),
         });
         return res.end(out);
       } catch (e) {

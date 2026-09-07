@@ -27,7 +27,11 @@ import {
   ttsModelDtype, isKnownTtsModel, isValidVoiceId, voiceLang,
 } from './tts-models.js';
 
-export const SAMPLE_RATE = 24000; // Kokoro's output rate — fixed by the model
+// Kokoro's rate. Kept as a named export because it is the default and several
+// callers want a number before anything is loaded — but it is NOT universal: a
+// VITS/MMS model outputs 16 kHz, and writing its samples into a 24 kHz WAV header
+// plays it back fast and chipmunked. Use sampleRate() once a model is active.
+export const SAMPLE_RATE = 24000;
 
 let _state = 'off';       // 'off' | 'loading' | 'downloading' | 'ready' | 'error'
 let _model = null;
@@ -37,14 +41,27 @@ let _dtype = null;
 let _err = null;
 let _progress = null;
 let _initPromise = null;
+let _arch = null;         // 'style-tts2' (Kokoro) | 'vits' (MMS et al)
+let _rate = SAMPLE_RATE;  // the ACTIVE model's output rate
 const _voices = new Map(); // voice id → Float32Array style bank
+
+// The architectures this engine can actually drive. Anything else is refused at
+// load with a message naming what it is, rather than failing later inside a
+// forward pass with a shape error nobody can act on.
+export const SUPPORTED_ARCH = { style_text_to_speech_2: 'style-tts2', vits: 'vits' };
+
+export function arch() { return _arch; }
+export function sampleRate() { return _rate; }
+// Kokoro picks a voice from a style bank; VITS is single-speaker and has none, so
+// the UI must not offer a voice list that cannot do anything.
+export function supportsVoices() { return _arch === 'style-tts2'; }
 
 export function state() { return _state; }
 export function isReady() { return _state === 'ready' && !!_net; }
 export function progress() { return _progress; }
 
 export function health() {
-  return { configured: _state !== 'off', ok: isReady(), state: _state, model: _model, dtype: _dtype, runtime: runtimeName(), error: _err };
+  return { configured: _state !== 'off', ok: isReady(), state: _state, model: _model, dtype: _dtype, runtime: runtimeName(), error: _err, arch: _arch, sampleRate: _rate, voices: supportsVoices() };
 }
 
 export function modelDir(modelId) {
@@ -119,18 +136,32 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true, dtype:
     // this is the SAME transformers instance ensureLib already configured (env,
     // cacheDir, wasm paths) — importing it here keeps ner-engine free of TTS.
     const tf = await import('@huggingface/transformers');
+
+    // Which architecture is this? Read the config BEFORE choosing a class, so an
+    // unsupported model is refused by name instead of exploding inside a forward
+    // pass with a tensor-shape error.
+    let modelType = '';
+    try {
+      const conf = await tf.AutoConfig.from_pretrained(modelId);
+      modelType = String(conf?.model_type || '').toLowerCase();
+    } catch { /* no config we can read — fall through to the Kokoro default */ }
+    const kind = SUPPORTED_ARCH[modelType] || (modelType ? null : 'style-tts2');
+    if (!kind) throw new Error(`unsupported TTS architecture "${modelType}" — this engine drives Kokoro (style_text_to_speech_2) and VITS/MMS`);
+
+    const onProgress = (p) => {
+      if (p?.status === 'progress' && p.file) _progress = { model: modelId, file: p.file, pct: Math.round(p.progress || 0) };
+    };
+    const Klass = kind === 'vits' ? tf.VitsModel : tf.StyleTextToSpeech2Model;
     const [net, tok] = await Promise.all([
-      tf.StyleTextToSpeech2Model.from_pretrained(modelId, {
-        dtype,
-        progress_callback: (p) => {
-          if (p?.status === 'progress' && p.file) _progress = { model: modelId, file: p.file, pct: Math.round(p.progress || 0) };
-        },
-      }),
+      Klass.from_pretrained(modelId, { dtype, progress_callback: onProgress }),
       tf.AutoTokenizer.from_pretrained(modelId),
     ]);
-    _net = net; _tok = tok; _model = modelId; _dtype = dtype;
+    _net = net; _tok = tok; _model = modelId; _dtype = dtype; _arch = kind;
+    // VITS/MMS emit 16 kHz; Kokoro 24 kHz. Take it from the model's own config
+    // where it says so, because guessing wrong plays the voice at the wrong pitch.
+    _rate = Number(net?.config?.sampling_rate) || (kind === 'vits' ? 16000 : SAMPLE_RATE);
     _state = 'ready'; _err = null; _progress = null;
-    log(`[tts] ready — model ${modelId} @ ${dtype} (${runtimeName()}, offline) — local speech active`);
+    log(`[tts] ready — model ${modelId} @ ${dtype} (${kind}, ${_rate} Hz, ${runtimeName()}, offline) — local speech active`);
     return true;
   } catch (e) {
     // A failed SWITCH keeps the previous working model, same as ner/stt.
@@ -231,8 +262,18 @@ export function splitSentences(text, maxChars = 300) {
  */
 export async function synthChunk(text, { voice = DEFAULT_TTS_VOICE, speed = 1 } = {}) {
   if (!isReady()) throw new Error('tts model not ready');
-  const { phonemize } = await import('phonemizer');
   const tf = await import('@huggingface/transformers');
+
+  // VITS/MMS: single-speaker, tokenizes GRAPHEMES directly — no phonemizer, no
+  // style bank, no speed input. One language per model, which is the trade for
+  // ~40 MB and a thousand of them.
+  if (_arch === 'vits') {
+    const inputs = _tok(String(text));
+    const out = await _net(inputs);
+    return out.waveform.data;
+  }
+
+  const { phonemize } = await import('phonemizer');
 
   // G2P follows the VOICE, not the request — an American voice reading British
   // phonemes is audibly wrong.
@@ -296,5 +337,6 @@ export function toWav(pcm, sampleRate = SAMPLE_RATE) {
 
 export function _reset() {
   _state = 'off'; _model = null; _net = null; _tok = null; _dtype = null;
-  _err = null; _progress = null; _initPromise = null; _voices.clear();
+  _err = null; _progress = null; _initPromise = null; _arch = null; _rate = SAMPLE_RATE;
+  _voices.clear();
 }

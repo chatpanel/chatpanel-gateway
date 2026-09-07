@@ -17,7 +17,7 @@ after(() => rmSync(MODELS, { recursive: true, force: true }));
 const tts = await import('../src/tts-engine.js');
 const {
   TTS_VOICES, TTS_MODEL_CATALOG, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, MAX_TTS_CHARS,
-  isKnownVoice, isValidVoiceId, isValidCustomTtsId, isKnownTtsModel, voiceLang,
+  isKnownVoice, isValidVoiceId, isValidCustomTtsId, isKnownTtsModel, voiceLang, ttsModel,
   ttsModelEngine, isValidTtsDtype,
 } = await import('../src/tts-models.js');
 
@@ -25,7 +25,9 @@ test('catalog: the default model and voice are both listed', () => {
   assert.ok(isKnownTtsModel(DEFAULT_TTS_MODEL));
   assert.ok(isKnownVoice(DEFAULT_TTS_VOICE));
   assert.equal(ttsModelEngine(DEFAULT_TTS_MODEL), 'style-tts2');
-  assert.ok(TTS_MODEL_CATALOG.every((m) => m.sampleRate === tts.SAMPLE_RATE));
+  // Not every model shares Kokoro's rate any more — VITS/MMS is 16 kHz. What must
+  // hold is that the DEFAULT matches the constant callers read before load.
+  assert.equal(ttsModel(DEFAULT_TTS_MODEL).sampleRate, tts.SAMPLE_RATE);
 });
 
 // A voice id is interpolated into a FILENAME (voices/<id>.bin) and into a fetch
@@ -186,4 +188,46 @@ test('health() is safe to call before anything is loaded', () => {
   assert.equal(h.ok, false);
   assert.ok(['off', 'error', 'ready', 'loading', 'downloading'].includes(h.state));
   assert.ok(['native', 'wasm'].includes(h.runtime));
+});
+
+// ── architecture dispatch ──────────────────────────────────────────────────────
+// The engine drives two families. Getting this wrong is not a soft failure: a
+// VITS model loaded as Kokoro dies in the forward pass, and a VITS waveform
+// written into Kokoro's 24 kHz header plays back fast and chipmunked.
+test('the supported architectures are exactly the two the engine implements', () => {
+  const { SUPPORTED_ARCH } = tts;
+  assert.deepEqual(Object.keys(SUPPORTED_ARCH).sort(), ['style_text_to_speech_2', 'vits']);
+  assert.equal(SUPPORTED_ARCH.style_text_to_speech_2, 'style-tts2');
+  assert.equal(SUPPORTED_ARCH.vits, 'vits');
+});
+
+test('before anything loads, the defaults are Kokoro-shaped and safe to read', () => {
+  assert.equal(tts.arch(), null);
+  assert.equal(tts.sampleRate(), tts.SAMPLE_RATE);
+  assert.equal(tts.supportsVoices(), false, 'no model means no voices to offer');
+});
+
+test('the catalog declares an arch and a rate for every entry', () => {
+  for (const m of TTS_MODEL_CATALOG) {
+    assert.ok(['style-tts2', 'vits'].includes(m.arch), `${m.id} has arch "${m.arch}"`);
+    assert.ok(m.sampleRate > 0, `${m.id} must declare its output rate`);
+    assert.equal(typeof m.voices, 'boolean', `${m.id} must say whether it has voices`);
+    // A single-speaker model must not claim voices, and vice versa.
+    assert.equal(m.voices, m.arch === 'style-tts2', `${m.id}: only Kokoro has selectable voices`);
+  }
+});
+
+test('ttsModelEngine dispatches on the catalog arch, defaulting to Kokoro', () => {
+  assert.equal(ttsModelEngine('Xenova/mms-tts-hin'), 'vits');
+  assert.equal(ttsModelEngine(DEFAULT_TTS_MODEL), 'style-tts2');
+  assert.equal(ttsModelEngine('someone/unknown-model'), 'style-tts2', 'an unknown id assumes the default family');
+});
+
+// toWav takes the rate as an ARGUMENT for exactly this reason.
+test('a 16 kHz model writes a 16 kHz header, not the Kokoro default', () => {
+  const w = tts.toWav(new Float32Array(80), 16000);
+  assert.equal(w.readUInt32LE(24), 16000, 'sample rate');
+  assert.equal(w.readUInt32LE(28), 32000, 'byte rate must follow the sample rate');
+  const k = tts.toWav(new Float32Array(80), 24000);
+  assert.equal(k.readUInt32LE(24), 24000);
 });
