@@ -16,8 +16,29 @@
 // driveable by a transformers.js class (Kokoro = StyleTextToSpeech2Model). Verify
 // it loads on BOTH runtimes (native q8 + WASM fp32) before listing it.
 
-export const DEFAULT_TTS_MODEL = 'onnx-community/Kokoro-82M-v1.0-ONNX';
+// Pocket TTS is the default where it can run: it is the fastest engine here
+// (7-9x realtime against Kokoro's 2.1x) and the only one that can speak as the
+// user. It needs the native onnxruntime, though, which the standalone binary does
+// not carry — so the binary falls back to Kokoro rather than offering a model it
+// cannot load. See src/ort.js for why.
+export const DEFAULT_TTS_MODEL_NATIVE = 'kyutai/pocket-tts';
+export const DEFAULT_TTS_MODEL_WASM = 'onnx-community/Kokoro-82M-v1.0-ONNX';
+export const DEFAULT_TTS_MODEL = DEFAULT_TTS_MODEL_WASM; // safe default; resolveDefaultModel() picks properly
 export const DEFAULT_TTS_VOICE = 'af_heart';
+
+// The eight speakers shipped in voices.bin. Names only — the data is a ~52 MB
+// optional download, and cloning works without it.
+export const POCKET_VOICES = ['alba', 'azelma', 'cosette', 'eponine', 'fantine', 'javert', 'jean', 'marius'];
+export const DEFAULT_POCKET_VOICE = 'alba';
+
+export function isPocketVoice(v) {
+  return POCKET_VOICES.includes(String(v || ''));
+}
+
+/** The model to use when nothing is configured, given what this runtime can load. */
+export function resolveDefaultModel(rawOrtAvailable = true) {
+  return rawOrtAvailable ? DEFAULT_TTS_MODEL_NATIVE : DEFAULT_TTS_MODEL_WASM;
+}
 
 // Style-vector width in a voices/*.bin file, and the max token window a single
 // forward pass accepts. Both are properties of the Kokoro export, and the engine
@@ -70,10 +91,12 @@ export const TTS_MODEL_CATALOG = [
     approxMB: 146,
     ramMB: 700,
     sampleRate: 24000,
-    voices: false,
-    customVoices: true,
+    voices: true,           // eight built-in speakers (optional 52 MB voices.bin)
+    customVoices: true,     // …and it can speak as YOU
     recommended: true,
-    note: 'Kyutai Pocket TTS (MIT code, CC-BY-4.0 weights). Records a few seconds and speaks as you. Needs a saved voice; 146 MB one-time download.',
+    // Raw onnxruntime, which the standalone binary cannot provide.
+    requiresNative: true,
+    note: 'Kyutai Pocket TTS (MIT code, CC-BY-4.0 weights). Eight built-in voices, and it can clone yours. Fastest model here. 146 MB, plus 52 MB if you want the built-in voices. Needs the npm gateway.',
   },
   {
     id: 'Xenova/speecht5_tts',
@@ -173,6 +196,11 @@ export function ttsModelHasVoices(id) {
 // embedding — the other two are conditioned on something fixed.
 export function ttsModelHasCustomVoices(id) {
   return ttsModel(id)?.customVoices === true;
+}
+
+/** Does this model need the native onnxruntime (i.e. not usable in the binary)? */
+export function ttsModelRequiresNative(id) {
+  return ttsModel(id)?.requiresNative === true;
 }
 
 export function ttsModel(id) {

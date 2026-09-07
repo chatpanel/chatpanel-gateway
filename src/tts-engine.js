@@ -69,6 +69,8 @@ export const SPEECHT5_VOCODER = 'Xenova/speecht5_hifigan';
 // tried it, but it borrows a voice rather than reproducing one.
 export function supportsCustomVoices() { return _arch === 'speecht5' || _arch === POCKET_ARCH; }
 export function isPocket() { return _arch === POCKET_ARCH; }
+/** The built-in speaker names the loaded Pocket model offers, if any. */
+export function builtinVoices() { return _pocket?.builtinVoices?.() || []; }
 
 /**
  * A PocketTTS instance purely for ENCODING a voice, without disturbing whatever
@@ -359,10 +361,10 @@ export async function synthChunk(text, { voice = DEFAULT_TTS_VOICE, speed = 1, s
   // Pocket TTS runs its own generation loop and chunking, so a whole utterance is
   // handed over at once rather than being pre-split here.
   if (_arch === POCKET_ARCH) {
-    if (!speakerEmbedding?.data?.length) {
-      throw new Error('this model needs a saved voice — record one in Settings → Text-to-speech');
-    }
-    return _pocket.synth(String(text), { voice: speakerEmbedding });
+    // Either a cloned voice (an embedding) or one of its built-in speakers (a name).
+    const v = speakerEmbedding?.data?.length ? speakerEmbedding : voice;
+    if (!v) throw new Error('this model needs a voice — pick a built-in one or record your own');
+    return _pocket.synth(String(text), { voice: v });
   }
 
   // SpeechT5: conditioned by a 512-d speaker embedding, which is the whole point —

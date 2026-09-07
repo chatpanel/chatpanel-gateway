@@ -19,7 +19,8 @@ test('the catalog routes pocket-tts to its own engine, not transformers', () => 
   assert.equal(ttsModelBundle('kyutai/pocket-tts'), 'english_2026-04');
   const m = ttsModel('kyutai/pocket-tts');
   assert.equal(m.customVoices, true, 'it exists to clone a voice');
-  assert.equal(m.voices, false, 'and has no built-in ones');
+  assert.equal(m.voices, true, 'and also ships eight built-in speakers');
+  assert.equal(m.requiresNative, true, 'raw onnxruntime — not available in the binary');
   assert.equal(m.sampleRate, pt.SAMPLE_RATE);
 });
 
@@ -95,4 +96,40 @@ test('synthesis without a voice is refused — there is nothing to speak as', as
   engine.ready = true; // pretend loaded; the voice check must come first
   await assert.rejects(() => engine.synth('hi', {}), /needs a voice/);
   await assert.rejects(() => engine.synth('hi', { voice: { data: new Float32Array(0), shape: [] } }), /needs a voice/);
+});
+
+// Built-in speakers and cloned voices live in DIFFERENT namespaces, and the
+// runtime decides whether this engine can be used at all.
+test('the built-in speaker names are known without downloading voices.bin', async () => {
+  const { POCKET_VOICES, DEFAULT_POCKET_VOICE, isPocketVoice } = await import('../src/tts-models.js');
+  assert.equal(POCKET_VOICES.length, 8);
+  assert.ok(POCKET_VOICES.includes(DEFAULT_POCKET_VOICE));
+  assert.ok(isPocketVoice('javert'));
+  // A Kokoro voice is not a Pocket voice — carrying one over is how a config ends
+  // up naming a speaker the active model has never heard of.
+  assert.equal(isPocketVoice('af_heart'), false);
+  assert.equal(isPocketVoice(''), false);
+  assert.equal(isPocketVoice(null), false);
+});
+
+test('the default model follows the runtime, not a hardcoded choice', async () => {
+  const { resolveDefaultModel, ttsModelRequiresNative } = await import('../src/tts-models.js');
+  assert.equal(resolveDefaultModel(true), 'kyutai/pocket-tts', 'native gets the fastest engine');
+  assert.equal(ttsModelRequiresNative(resolveDefaultModel(false)), false,
+    'the binary default must be a model the binary can actually load');
+});
+
+test('voices.bin is optional — the bundle is complete without it', () => {
+  const dir = pt.bundleDir('english_2026-04');
+  mkdirSync(dir, { recursive: true });
+  for (const f of ['bundle.json', 'tokenizer.model', 'bos_before_voice.npy',
+    'text_conditioner_int8.onnx', 'mimi_encoder_int8.onnx', 'mimi_decoder_int8.onnx',
+    'flow_lm_main_int8.onnx', 'flow_lm_flow_int8.onnx']) writeFileSync(join(dir, f), 'stub');
+  assert.equal(pt.bundleOnDisk('english_2026-04'), true, 'cloning must not depend on the stock voices');
+  assert.equal(pt.voicesBinOnDisk('english_2026-04'), false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a voices.bin with the wrong header is refused, not misread', () => {
+  assert.throws(() => pt.parseVoicesBin(Buffer.from('NOPE-not-a-voices-file')), /header/);
 });

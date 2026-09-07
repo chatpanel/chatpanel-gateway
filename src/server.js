@@ -40,8 +40,9 @@ import * as diarizeEngine from './diarize-engine.js';
 import { MODEL_CATALOG, isKnownModel, isValidCustomModelId } from './models.js';
 import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MODEL, STT_DTYPES, isValidDtype } from './stt-models.js';
 import * as ttsEngine from './tts-engine.js';
-import { TTS_MODEL_CATALOG, TTS_VOICES, isKnownTtsModel, isValidCustomTtsId, isKnownVoice, isValidVoiceId, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, TTS_DTYPES, isValidTtsDtype, MAX_TTS_CHARS, ttsModelHasCustomVoices } from './tts-models.js';
+import { TTS_MODEL_CATALOG, TTS_VOICES, isKnownTtsModel, isValidCustomTtsId, isKnownVoice, isValidVoiceId, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, TTS_DTYPES, isValidTtsDtype, MAX_TTS_CHARS, ttsModelHasCustomVoices, ttsModelRequiresNative, resolveDefaultModel, POCKET_VOICES, DEFAULT_POCKET_VOICE, isPocketVoice, ttsModelEngine as ttsModelEngineOf } from './tts-models.js';
 import { ttsDestination, synthesizeRemote, isValidRemoteVoice } from './tts-remote.js';
+import { rawOrtAvailable } from './ort.js';
 import * as ttsVoices from './tts-voices.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, applyNerModelSelection, persistConfig, configPath } from './configstore.js';
@@ -53,7 +54,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.56';
+export const VERSION = '0.6.57';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -998,8 +999,17 @@ export function createGateway(cfg = loadConfig()) {
     // docs/voice-pipeline.md. Model manager first, then synthesis.
     if (pathname === '/tts/models') {
       if (req.method === 'GET') {
-        const active = ttsEngine.health().model || cfg.tts?.model || DEFAULT_TTS_MODEL;
-        const available = /** @type {any[]} */ (TTS_MODEL_CATALOG.map((m) => ({ ...m, installed: ttsEngine.modelOnDisk(m.id) })));
+        const active = ttsEngine.health().model || cfg.tts?.model || resolveDefaultModel(rawOrtAvailable());
+        // A model needing the native runtime is still LISTED on the binary, with the
+        // reason — hiding it makes "why can't I clone my voice?" unanswerable.
+        const nativeOk = rawOrtAvailable();
+        const available = /** @type {any[]} */ (TTS_MODEL_CATALOG.map((m) => ({
+          ...m,
+          installed: ttsEngine.modelOnDisk(m.id),
+          unavailable: m.requiresNative && !nativeOk
+            ? 'needs the npm gateway — the standalone binary cannot load this engine'
+            : undefined,
+        })));
         if (active && !available.some((m) => m.id === active)) {
           available.push({ id: active, label: active, lang: '—', tier: 'custom', custom: true, installed: ttsEngine.modelOnDisk(active), note: 'Custom model (from Hugging Face).' });
         }
@@ -1008,7 +1018,9 @@ export function createGateway(cfg = loadConfig()) {
           state: ttsEngine.state(),
           progress: ttsEngine.progress(),
           available,
-          voice: cfg.tts?.voice || DEFAULT_TTS_VOICE,
+          // The default voice belongs to the model's own namespace: Kokoro's
+          // af_heart means nothing to Pocket, and vice versa.
+          voice: cfg.tts?.voice || (ttsModelEngineOf(active) === 'pocket-tts' ? DEFAULT_POCKET_VOICE : DEFAULT_TTS_VOICE),
           // Architecture decides whether voices mean anything: Kokoro picks one from
           // a style bank, VITS/MMS is single-speaker. An empty list tells the UI to
           // hide the picker rather than offer choices that cannot take effect.
@@ -1019,9 +1031,14 @@ export function createGateway(cfg = loadConfig()) {
           // Built-in voices belong to Kokoro alone. VITS is single-speaker and
           // SpeechT5 speaks only in a RECORDED voice, so offering Kokoro's list
           // for either would be offering choices that cannot take effect.
-          voices: ttsEngine.arch() && ttsEngine.arch() !== 'style-tts2'
-            ? []
-            : TTS_VOICES.map((v) => ({ ...v, installed: ttsEngine.voiceOnDisk(v.id, active) })),
+          voices: (ttsEngine.isPocket() || (!ttsEngine.arch() && ttsModelEngineOf(active) === 'pocket-tts'))
+            // Pocket ships eight speakers in an optional 52 MB file; report what is
+            // actually loaded rather than the catalog's aspiration.
+            ? (ttsEngine.builtinVoices().length ? ttsEngine.builtinVoices() : POCKET_VOICES)
+              .map((n) => ({ id: n, label: n[0].toUpperCase() + n.slice(1), lang: 'en', installed: ttsEngine.builtinVoices().includes(n) }))
+            : ttsEngine.arch() && ttsEngine.arch() !== 'style-tts2'
+              ? []
+              : TTS_VOICES.map((v) => ({ ...v, installed: ttsEngine.voiceOnDisk(v.id, active) })),
           dtype: cfg.tts?.dtype || 'auto',
           loadedDtype: ttsEngine.health().dtype,
           runtime: ttsEngine.health().runtime,
@@ -1040,7 +1057,7 @@ export function createGateway(cfg = loadConfig()) {
         const voice = body && typeof body.voice === 'string' ? body.voice.trim() : null;
         if (voice) {
           const cid = ttsVoices.parseCustomVoice(voice);
-          const okVoice = cid ? !!ttsVoices.getVoice(cid) : (isKnownVoice(voice) && isValidVoiceId(voice));
+          const okVoice = cid ? !!ttsVoices.getVoice(cid) : (isPocketVoice(voice) || (isKnownVoice(voice) && isValidVoiceId(voice)));
           if (!okVoice) return sendJson(res, 400, { error: { message: 'unknown or invalid voice', type: 'bad_voice' } });
         }
         const dtype = body && typeof body.dtype === 'string' && isValidTtsDtype(body.dtype) ? body.dtype : undefined;
@@ -1066,6 +1083,11 @@ export function createGateway(cfg = loadConfig()) {
           } else if (!wantsCustom && isCustom) {
             cfg.tts.voice = DEFAULT_TTS_VOICE;
           }
+          // Kokoro and Pocket name their speakers differently; carrying one over
+          // leaves a voice the new model has never heard of.
+          const toPocket = ttsModelEngineOf(id) === 'pocket-tts';
+          if (toPocket && !ttsVoices.parseCustomVoice(cfg.tts.voice || '') && !isPocketVoice(cfg.tts.voice)) cfg.tts.voice = DEFAULT_POCKET_VOICE;
+          if (!toPocket && isPocketVoice(cfg.tts.voice)) cfg.tts.voice = DEFAULT_TTS_VOICE;
         }
         if (dtype) cfg.tts.dtype = dtype === 'auto' ? null : dtype;
         try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
@@ -1226,7 +1248,7 @@ export function createGateway(cfg = loadConfig()) {
         const ok = await ttsEngine.ready({
           onLog: (m) => console.log(m),
           allowDownload: cfg.tts?.allowDownload !== false,
-          model: cfg.tts?.model || DEFAULT_TTS_MODEL,
+          model: cfg.tts?.model || resolveDefaultModel(rawOrtAvailable()),
           dtype: cfg.tts?.dtype || 'auto',
         });
         if (!ok) return sendJson(res, 503, { error: { message: ttsEngine.health().error || 'tts model not ready', type: 'tts_unavailable' } });
@@ -1239,7 +1261,13 @@ export function createGateway(cfg = loadConfig()) {
         let speakerEmbedding = null;
         let customId = ttsVoices.parseCustomVoice(voice);
 
-        if (ttsEngine.supportsCustomVoices()) {
+        // A Pocket built-in speaker is a NAME, not an embedding, so it has to be
+        // recognised before the custom-voice path — which would otherwise demand a
+        // recording for a model that ships eight voices of its own.
+        if (ttsEngine.isPocket() && isPocketVoice(rawVoice || useVoice)) {
+          useVoice = rawVoice || useVoice;
+          customId = null;
+        } else if (ttsEngine.supportsCustomVoices()) {
           // This model speaks ONLY in a recorded voice. If the configured one names
           // a built-in (switching model does not rewrite `voice`) or points at a
           // voice since deleted, fall back to the most recent saved one — the
@@ -1249,8 +1277,13 @@ export function createGateway(cfg = loadConfig()) {
           if (!rec && !rawVoice) {
             const saved = ttsVoices.listVoices();
             if (saved.length) { customId = saved[0].id; rec = ttsVoices.getVoice(customId); }
+            // Pocket can fall back to a built-in speaker; SpeechT5 has none, so for
+            // that one "no saved voice" really is the end of the road.
+            else if (ttsEngine.isPocket()) { useVoice = DEFAULT_POCKET_VOICE; customId = null; }
           }
-          if (!rec) {
+          if (!rec && !customId && ttsEngine.isPocket()) {
+            // resolved to a built-in above — nothing more to look up
+          } else if (!rec) {
             return sendJson(res, customId ? 404 : 400, {
               error: {
                 message: customId ? 'no such saved voice' : 'this model speaks in a voice you record — add one in Settings → Text-to-speech',
@@ -1287,7 +1320,11 @@ export function createGateway(cfg = loadConfig()) {
           }
           customId = null;
           useVoice = DEFAULT_TTS_VOICE;
-        } else if (ttsEngine.supportsVoices() && !(isKnownVoice(useVoice) && isValidVoiceId(useVoice))) {
+        } else if (ttsEngine.isPocket() && !isPocketVoice(useVoice)) {
+          // Pocket has its own speaker namespace; a Kokoro voice name here means the
+          // config was carried over from another model, so fall back to its default.
+          useVoice = DEFAULT_POCKET_VOICE;
+        } else if (ttsEngine.supportsVoices() && !ttsEngine.isPocket() && !(isKnownVoice(useVoice) && isValidVoiceId(useVoice))) {
           return sendJson(res, 400, { error: { message: 'unknown or invalid voice', type: 'bad_voice' } });
         }
 

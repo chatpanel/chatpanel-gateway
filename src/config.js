@@ -119,8 +119,13 @@ export const DEFAULTS = {
     // client as everywhere else here; no key is stored. See src/tts-remote.js for
     // why remote synthesis redacts by default and what that costs.
     provider: 'local',
-    model: 'onnx-community/Kokoro-82M-v1.0-ONNX',
-    voice: 'af_heart',
+    // Empty = decide at runtime. Pocket TTS is the better default (fastest here,
+    // and the only engine that can speak as you) but needs the native onnxruntime,
+    // which the standalone binary does not carry — so hardcoding either one is
+    // wrong for half the installs. resolveDefaultModel() picks per runtime, and an
+    // explicit choice here always wins.
+    model: '',
+    voice: '',
     allowDownload: true,
     remote: {
       baseUrl: '',   // '' = the provider's own default endpoint

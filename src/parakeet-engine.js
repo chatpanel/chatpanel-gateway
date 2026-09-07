@@ -26,6 +26,7 @@ import { join } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, createWriteStream, renameSync, statSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { modelRoot } from './ner-engine.js';
+import { getOrt, ortProviders } from './ort.js';
 
 // transformers.js reports these `model_type`s for the transducer exports. Any of them
 // means "not a whisper pipeline model — route here instead".
@@ -72,20 +73,6 @@ export function parakeetOnDisk(modelId, dtype = PARAKEET_DEFAULT_DTYPE) {
 // The npm gateway uses native onnxruntime-node (fast). The standalone binary embeds the
 // onnxruntime-web WASM runtime and hands us its paths via __CHATPANEL_WASM_PATHS__ (the
 // same global ner-engine keys off) — configure ORT-web from it. Memoized once.
-let _ortPromise = null;
-function getOrt() {
-  if (_ortPromise) return _ortPromise;
-  _ortPromise = (async () => {
-    const wasmPaths = globalThis.__CHATPANEL_WASM_PATHS__ || null;
-    const mod = await import(wasmPaths ? 'onnxruntime-web' : 'onnxruntime-node');
-    const ort = mod.InferenceSession ? mod : (mod.default || mod);
-    if (wasmPaths) {
-      try { ort.env.wasm.numThreads = 1; ort.env.wasm.proxy = false; ort.env.wasm.wasmPaths = wasmPaths; } catch { /* optional */ }
-    }
-    return ort;
-  })();
-  return _ortPromise;
-}
 
 // ── download (only when a model isn't already on disk) ───────────────────────────────
 // Custom/BYO STT ids aren't on the dl.chatpanel.net mirror, so — like stt-engine's
@@ -166,7 +153,7 @@ export async function loadRecognizer({ modelId, dtype = PARAKEET_DEFAULT_DTYPE, 
 
   const ort = await getOrt();
   const s = dt === 'fp32' ? '' : '.int8';
-  const opts = { executionProviders: ['cpu'], graphOptimizationLevel: 'all', logSeverityLevel: 3 };
+  const opts = { executionProviders: ortProviders(), graphOptimizationLevel: 'all', logSeverityLevel: 3 };
   const [prep, encoder, decoder] = await Promise.all([
     ort.InferenceSession.create(join(dir, 'nemo128.onnx'), opts),
     ort.InferenceSession.create(join(dir, `encoder-model${s}.onnx`), opts),

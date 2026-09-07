@@ -27,8 +27,12 @@ import { existsSync, mkdirSync, readFileSync, statSync, createWriteStream, renam
 import { Readable } from 'node:stream';
 import { modelRoot } from './ner-engine.js';
 import { SentencePieceUnigram } from './sentencepiece.js';
+import { getOrt, ortProviders } from './ort.js';
 
 export const POCKET_REPO = 'KevinAHM/pocket-tts-onnx';
+// The built-in speakers live in the demo Space, not the weights repo — the weights
+// repo 404s on voices.bin. Same author, same licence, different HF namespace.
+export const POCKET_VOICES_SPACE = 'KevinAHM/pocket-tts-web';
 export const DEFAULT_BUNDLE = 'english_2026-04';
 export const SAMPLE_RATE = 24000;
 
@@ -43,30 +47,16 @@ const NORMAL_CHUNK_FRAMES = 12;
 // sentence's trailing state colour the next one's opening.
 const RESET_STATE_EACH_CHUNK = true;
 
-// voices.bin (the reference implementation's PREDEFINED speakers) is deliberately
-// absent: it lives only in the demo Space, not the weights repo, and this engine
-// exists to speak in a voice the user recorded. Kokoro already covers "pick a
-// stock voice", and far better.
 const FILES = (q = '_int8') => [
   'bundle.json', 'tokenizer.model', 'bos_before_voice.npy',
   `text_conditioner${q}.onnx`, `mimi_encoder${q}.onnx`, `mimi_decoder${q}.onnx`,
   `flow_lm_main${q}.onnx`, `flow_lm_flow${q}.onnx`,
 ];
+// voices.bin is a separate ~52 MB download for the eight built-in speakers, and it
+// is OPTIONAL: cloning works without it, so a failed or skipped fetch costs the
+// stock voices and nothing else.
+const VOICES_FILE = 'voices.bin';
 
-let _ortPromise = null;
-function getOrt() {
-  if (_ortPromise) return _ortPromise;
-  _ortPromise = (async () => {
-    const wasmPaths = globalThis.__CHATPANEL_WASM_PATHS__ || null;
-    const mod = await import(wasmPaths ? 'onnxruntime-web' : 'onnxruntime-node');
-    const ort = mod.InferenceSession ? mod : (mod.default || mod);
-    if (wasmPaths) {
-      try { ort.env.wasm.numThreads = 1; ort.env.wasm.proxy = false; ort.env.wasm.wasmPaths = wasmPaths; } catch { /* optional */ }
-    }
-    return ort;
-  })();
-  return _ortPromise;
-}
 
 export function bundleDir(bundle = DEFAULT_BUNDLE) {
   return join(modelRoot(), 'pocket-tts', bundle);
@@ -80,7 +70,9 @@ export function bundleOnDisk(bundle = DEFAULT_BUNDLE, quant = '_int8') {
 }
 
 async function downloadFile(bundle, file, dir, { onProgress, log } = {}) {
-  const url = `https://huggingface.co/${POCKET_REPO}/resolve/main/onnx/${bundle}/${file}`;
+  const url = file === VOICES_FILE
+    ? `https://huggingface.co/spaces/${POCKET_VOICES_SPACE}/resolve/main/onnx/${bundle}/${file}`
+    : `https://huggingface.co/${POCKET_REPO}/resolve/main/onnx/${bundle}/${file}`;
   const res = await fetch(url, { redirect: 'follow' });
   if (!res.ok || !res.body) throw new Error(`fetch ${file} → HTTP ${res.status}`);
   const total = Number(res.headers.get('content-length')) || 0;
@@ -108,6 +100,21 @@ export async function ensureBundle(bundle = DEFAULT_BUNDLE, quant = '_int8', { o
     await downloadFile(bundle, file, dir, { onProgress, log });
   }
   return dir;
+}
+
+/** Fetch the built-in speakers. Optional — failure leaves cloning fully working. */
+export async function ensureVoicesBin(bundle = DEFAULT_BUNDLE, { onProgress, log } = {}) {
+  const dir = bundleDir(bundle);
+  const dest = join(dir, VOICES_FILE);
+  if (existsSync(dest) && statSync(dest).size > 1024) return dest;
+  mkdirSync(dir, { recursive: true });
+  log?.(`[pocket-tts] downloading ${VOICES_FILE} (built-in voices, ~52 MB)…`);
+  await downloadFile(bundle, VOICES_FILE, dir, { onProgress, log });
+  return dest;
+}
+
+export function voicesBinOnDisk(bundle = DEFAULT_BUNDLE) {
+  try { const p = join(bundleDir(bundle), VOICES_FILE); return existsSync(p) && statSync(p).size > 1024; } catch { return false; }
 }
 
 // ── .npy (float32) ──────────────────────────────────────────────────────────────
@@ -152,6 +159,102 @@ function advanceState(state, result, manifest) {
   for (const e of manifest) state[e.input_name] = result[e.output_name];
 }
 
+
+// ── built-in speakers ───────────────────────────────────────────────────────────
+// voices.bin (PTVB1) is a flat table of per-voice tensor STATES — the model's
+// internal state after it has been conditioned on that speaker — rather than
+// audio or embeddings. Loading one is therefore not "encode a voice" but "restore
+// the state a voice produces", which is why it takes a different path from cloning.
+export function parseVoicesBin(buf) {
+  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  const view = new DataView(ab);
+  let off = 0;
+  const magic = new TextDecoder().decode(new Uint8Array(ab, 0, 5));
+  off += 5;
+  if (magic !== 'PTVB1') throw new Error('not a voices.bin (bad header)');
+  const voices = {};
+  const count = view.getUint32(off, true); off += 4;
+  for (let v = 0; v < count; v++) {
+    const nameLen = view.getUint16(off, true); off += 2;
+    const name = new TextDecoder().decode(new Uint8Array(ab, off, nameLen)); off += nameLen;
+    const tensorCount = view.getUint16(off, true); off += 2;
+    const tensors = {};
+    for (let t = 0; t < tensorCount; t++) {
+      const keyLen = view.getUint16(off, true); off += 2;
+      const key = new TextDecoder().decode(new Uint8Array(ab, off, keyLen)); off += keyLen;
+      const dtypeCode = view.getUint8(off); off += 1;
+      const rank = view.getUint8(off); off += 1;
+      const shape = [];
+      for (let d = 0; d < rank; d++) { shape.push(view.getUint32(off, true)); off += 4; }
+      const byteLength = view.getUint32(off, true); off += 4;
+      const slice = ab.slice(off, off + byteLength);
+      const data = dtypeCode === 0 ? new Float32Array(slice)
+        : dtypeCode === 1 ? new BigInt64Array(slice)
+          : dtypeCode === 2 ? new Uint8Array(slice)
+            : (() => { throw new Error(`unsupported voices.bin dtype ${dtypeCode}`); })();
+      off += byteLength;
+      tensors[key] = { data, shape, dtype: dtypeCode === 0 ? 'float32' : dtypeCode === 1 ? 'int64' : 'bool' };
+    }
+    voices[name] = tensors;
+  }
+  return voices;
+}
+
+// A saved state is keyed "module/tensor"; the manifest addresses the same tensors
+// by module + key, so the flat table is regrouped before it can be matched.
+function groupByModule(record) {
+  const grouped = {};
+  for (const [k, v] of Object.entries(record)) {
+    const i = k.indexOf('/');
+    if (i === -1) continue;
+    (grouped[k.slice(0, i)] ||= {})[k.slice(i + 1)] = v;
+  }
+  return grouped;
+}
+
+// Some modules record their position under a different name (or not at all), so
+// the manifest's `step` is derived from whichever the module actually kept.
+function deriveStep(moduleState) {
+  if (moduleState.step) return { data: BigInt64Array.from([BigInt(moduleState.step.data[0])]), shape: [1], dtype: 'int64' };
+  if (moduleState.offset && !moduleState.end_offset) return { data: BigInt64Array.from([BigInt(moduleState.offset.data[0])]), shape: [1], dtype: 'int64' };
+  if (moduleState.current_end) return { data: BigInt64Array.from([BigInt(moduleState.current_end.shape[0])]), shape: [1], dtype: 'int64' };
+  return { data: BigInt64Array.from([0n]), shape: [1], dtype: 'int64' };
+}
+
+// A saved tensor may not match the manifest's shape exactly (a shorter cache, say).
+// Copy what overlaps into a correctly-shaped, correctly-filled target rather than
+// handing ORT a tensor of the wrong rank.
+function adaptTensor(source, entry) {
+  const target = filledArray(entry.shape, entry.dtype, entry.fill);
+  const targetSize = entry.shape.reduce((a, b) => a * b, 1);
+  const Ctor = entry.dtype === 'int64' ? BigInt64Array : entry.dtype === 'bool' ? Uint8Array : Float32Array;
+  const sameRank = source.shape.length === entry.shape.length;
+  if ((sameRank && source.shape.every((d, i) => d === entry.shape[i])) || source.data.length === targetSize) {
+    return new Ctor(source.data);
+  }
+  if (!sameRank) return target;
+  const strides = [];
+  let stride = 1;
+  for (let i = source.shape.length - 1; i >= 0; i--) { strides[i] = stride; stride *= source.shape[i]; }
+  const idx = new Array(source.shape.length).fill(0);
+  const max = source.shape.map((d, i) => Math.min(d, entry.shape[i]));
+  if (max.some((m) => m === 0)) return target;
+  for (;;) {
+    let si = 0;
+    for (let i = 0; i < idx.length; i++) si += idx[i] * strides[i];
+    let ti = 0, ts = 1;
+    for (let i = entry.shape.length - 1; i >= 0; i--) { ti += idx[i] * ts; ts *= entry.shape[i]; }
+    target[ti] = source.data[si];
+    let dim = idx.length - 1;
+    for (; dim >= 0; dim--) {
+      if (++idx[dim] < max[dim]) break;
+      idx[dim] = 0;
+      if (dim === 0) return target;
+    }
+    if (dim < 0) return target;
+  }
+}
+
 export class PocketTTS {
   constructor() {
     this.ready = false;
@@ -164,7 +267,11 @@ export class PocketTTS {
     this.latentDim = 32;
     this.condDim = 1024;
     this.samplesPerFrame = 1920;
+    this.builtin = null;        // name → saved tensor state, from voices.bin
   }
+
+  /** The built-in speaker names available, or [] if voices.bin was not fetched. */
+  builtinVoices() { return this.builtin ? Object.keys(this.builtin).sort() : []; }
 
   async load(bundle = DEFAULT_BUNDLE, { quant = '_int8', onProgress, log = () => {} } = {}) {
     const dir = await ensureBundle(bundle, quant, { onProgress, log });
@@ -176,7 +283,7 @@ export class PocketTTS {
     this.condDim = Number(this.meta.conditioning_dim) || 1024;
     this.samplesPerFrame = Math.round(SAMPLE_RATE / (Number(this.meta.frame_rate) || 12.5));
 
-    const opts = { executionProviders: ['cpu'], graphOptimizationLevel: 'all', logSeverityLevel: 3 };
+    const opts = { executionProviders: ortProviders(), graphOptimizationLevel: 'all', logSeverityLevel: 3 };
     const [textConditioner, mimiEncoder, mimiDecoder, flowMain, flowFlow] = await Promise.all([
       ort.InferenceSession.create(join(dir, `text_conditioner${quant}.onnx`), opts),
       ort.InferenceSession.create(join(dir, `mimi_encoder${quant}.onnx`), opts),
@@ -197,6 +304,12 @@ export class PocketTTS {
         t: new ort.Tensor('float32', new Float32Array([s + dt]), [1, 1]),
       });
     }
+    // Built-in speakers are optional: a missing or unreadable voices.bin costs the
+    // stock voices and leaves cloning — the reason this engine exists — untouched.
+    try {
+      if (voicesBinOnDisk(bundle)) this.builtin = parseVoicesBin(readFileSync(join(dir, 'voices.bin')));
+    } catch (e) { log(`[pocket-tts] built-in voices unavailable (${e.message})`); }
+
     this.bundle = bundle;
     this.ready = true;
     log(`[pocket-tts] ready — ${bundle} (${quant.replace('_', '') || 'fp32'}, ${SAMPLE_RATE} Hz)`);
@@ -234,6 +347,22 @@ export class PocketTTS {
       dims = [1, dims[1] + this.bos.shape[1], dims[2]];
     }
     return new ort.Tensor('float32', data, dims);
+  }
+
+  // Restore the flow-LM state a built-in speaker was saved with.
+  #builtinState(name) {
+    const record = this.builtin?.[name];
+    if (!record) throw new Error(`unknown built-in voice: ${name}`);
+    const { ort } = this.sessions;
+    const grouped = groupByModule(record);
+    const state = initState(ort, this.meta.flow_lm_state_manifest);
+    for (const e of this.meta.flow_lm_state_manifest) {
+      const moduleState = grouped[e.module] || {};
+      const source = moduleState[e.key] || (e.key === 'step' ? deriveStep(moduleState) : null);
+      if (!source) continue;
+      state[e.input_name] = new ort.Tensor(e.dtype, adaptTensor(source, e), e.shape);
+    }
+    return state;
   }
 
   async #voiceState(voice) {
@@ -288,12 +417,17 @@ export class PocketTTS {
    */
   async synth(text, { voice, onAudio = null } = {}) {
     if (!this.ready) throw new Error('pocket-tts not loaded');
-    if (!voice?.data?.length) throw new Error('pocket-tts needs a voice — record one');
+    // Either a cloned voice ({data, shape} from encodeVoice) or a built-in name.
+    if (typeof voice === 'string') {
+      if (!this.builtin?.[voice]) throw new Error(`unknown built-in voice: ${voice}`);
+    } else if (!voice?.data?.length) {
+      throw new Error('pocket-tts needs a voice — record one, or pick a built-in');
+    }
     const { ort, textConditioner, flowMain, flowFlow, mimiDecoder } = this.sessions;
     const prepared = this.#prepare(text);
     if (!prepared.text) return new Float32Array(0);
     const chunks = this.#chunks(prepared.text);
-    const baseFlow = await this.#voiceState(voice);
+    const baseFlow = typeof voice === 'string' ? this.#builtinState(voice) : await this.#voiceState(voice);
 
     const emptySeq = new ort.Tensor('float32', new Float32Array(0), [1, 0, this.latentDim]);
     const emptyText = new ort.Tensor('float32', new Float32Array(0), [1, 0, this.condDim]);

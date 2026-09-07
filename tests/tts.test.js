@@ -217,14 +217,16 @@ test('the catalog declares an arch and a rate for every entry', () => {
     assert.ok(['style-tts2', 'vits', 'speecht5', 'pocket-tts'].includes(m.arch), `${m.id} has arch "${m.arch}"`);
     assert.ok(m.sampleRate > 0, `${m.id} must declare its output rate`);
     assert.equal(typeof m.voices, 'boolean', `${m.id} must say whether it has voices`);
-    // Built-in voices are a Kokoro thing; a RECORDED voice is a SpeechT5 thing.
-    // Nothing may claim both, and only speecht5 may claim the second.
-    assert.equal(m.voices, m.arch === 'style-tts2', `${m.id}: only Kokoro has built-in voices`);
-    // Two engines can be pointed at a person: Pocket TTS (built for it) and
-    // SpeechT5 (borrows a print from a space it was not trained on).
+    // Kokoro and Pocket both ship built-in speakers; VITS is single-speaker and
+    // SpeechT5 has none of its own. Pocket is the only one with BOTH kinds, which
+    // is exactly why the picker cannot treat them as mutually exclusive.
+    assert.equal(m.voices, m.arch === 'style-tts2' || m.arch === 'pocket-tts',
+      `${m.id}: built-in voices belong to Kokoro and Pocket`);
     assert.equal(!!m.customVoices, m.arch === 'speecht5' || m.arch === 'pocket-tts',
       `${m.id}: only the cloning engines take a speaker embedding`);
-    assert.ok(!(m.voices && m.customVoices), `${m.id}: a model cannot have both kinds of voice`);
+    // A model needing the native runtime must say so, or the binary offers a
+    // download it can never load.
+    if (m.arch === 'pocket-tts') assert.equal(m.requiresNative, true, `${m.id} must be marked native-only`);
   }
 });
 
