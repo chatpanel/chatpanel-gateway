@@ -454,6 +454,11 @@ export function joinUpstream(base, pathname, search = '') {
   return b + pathname + search;
 }
 
+// Paths this gateway serves ITSELF. Used only to tell "you asked for a local
+// feature I do not have" apart from "you asked me to proxy something upstream" —
+// without it, calling a route added in a newer version reports a provider failure.
+const LOCAL_NAMESPACES = ['/tts', '/stt', '/ner', '/diarize', '/skills', '/config', '/logs', '/status', '/admin'];
+
 async function handleApi(req, res, { adapter, kind, pathname, search, base, destKey, destProtocol, harness, trace }, outBody, vault) {
   let upstream;
   const up0 = trace ? trace.clock() : 0;
@@ -1287,6 +1292,20 @@ export function createGateway(cfg = loadConfig()) {
     // Model discovery — aggregate every destination's models.
     if (req.method === 'GET' && /\/models$/.test(pathname)) {
       return sendJson(res, 200, await aggregateModelsAsync(cfg));
+    }
+
+    // Anything under a LOCAL namespace that reached here matched no route, which
+    // almost always means the caller is newer than this gateway. Falling through to
+    // the model proxy makes that arrive as "upstream fetch failed", pointing the
+    // user at their model provider for a feature their gateway simply does not
+    // have yet — so these 404 with the actual reason instead.
+    if (LOCAL_NAMESPACES.some((ns) => pathname === ns || pathname.startsWith(`${ns}/`))) {
+      return sendJson(res, 404, {
+        error: {
+          message: `this gateway (${VERSION}) has no ${pathname} — update it to use this feature`,
+          type: 'unknown_endpoint',
+        },
+      });
     }
 
     const r = route(pathname, req.headers, cfg);
