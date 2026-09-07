@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import { existsSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { ensureLib, modelRoot } from './ner-engine.js';
+import { runtimeDtype, runtimeName, DTYPE_SUFFIX } from './model-runtime.js';
 import { verifyModelWeights } from './model-integrity.js';
 import { DEFAULT_STT_MODEL, isEnglishOnly, sttModelDtype, isKnownSttModel, sttModelEngine } from './stt-models.js';
 import * as parakeet from './parakeet-engine.js';
@@ -27,27 +28,10 @@ import * as diarize from './diarize-engine.js';
 
 export const SAMPLE_RATE = 16000; // fixed wire contract: 16 kHz mono Float32 PCM
 
-// The right whisper quantization depends on the ONNX RUNTIME, not the OS:
-//   • native onnxruntime-node (the npm gateway) loads the small, fast `q8`
-//     (_quantized) exports — best size + speed.
-//   • onnxruntime-web WASM (the standalone binary — SAME wasm on macOS/Windows/
-//     Linux, so this is inherently cross-platform) CANNOT load the block-quantized
-//     exports (q8/int8/uint8 → MatMulNBits "missing scale"; fp16 → graph error);
-//     of the loadable ones only `fp32` is fast enough for real-time (q4/bnb4 are
-//     ~8× slower). Verified empirically against the bundled ORT-web build.
-// The binary entry sets __CHATPANEL_WASM_PATHS__, so that global tells us which
-// runtime we're on. A model may override via `dtype` in the STT catalog.
-export function runtimeDtype() {
-  return globalThis.__CHATPANEL_WASM_PATHS__ ? 'fp32' : 'q8';
-}
-
-// Which ONNX runtime is active: the standalone binary uses onnxruntime-web WASM
-// (fp32-only, single-thread — ~10× slower); the npm package uses onnxruntime-node
-// (native, quantized q8). The extension surfaces this so users on the slow WASM
-// build know the native gateway is far faster.
-export function runtimeName() {
-  return globalThis.__CHATPANEL_WASM_PATHS__ ? 'wasm' : 'native';
-}
+// runtimeDtype / runtimeName moved to model-runtime.js — the WASM binary's fp32-only
+// constraint is a property of the runtime, and tts-engine needs the same answer.
+// Re-exported here so this module's public API is unchanged for existing callers.
+export { runtimeDtype, runtimeName };
 
 let _state = 'off';        // 'off' | 'loading' | 'downloading' | 'ready' | 'error'
 let _model = null;         // active model id
@@ -56,15 +40,6 @@ let _err = null;           // last error message (for /health)
 let _initPromise = null;   // single-flight init
 let _progress = null;      // { model, file, pct } while downloading, else null
 let _dtype = null;         // the quantization actually loaded (fp32 on WASM, q8 native)
-
-// transformers.js dtype → the ONNX filename suffix it loads. Presence must check
-// the EXACT file the current runtime will fetch — otherwise a q8 install (native)
-// looks "present" to the WASM runtime, which actually needs the fp32 file, and the
-// offline load fails. Checking the real target makes a runtime switch re-download.
-const DTYPE_SUFFIX = {
-  fp32: '', q8: '_quantized', int8: '_int8', uint8: '_uint8',
-  fp16: '_fp16', q4: '_q4', bnb4: '_bnb4', q4f16: '_q4f16',
-};
 
 export function modelOnDisk(modelId = _model || DEFAULT_STT_MODEL, dtype = sttModelDtype(modelId) || runtimeDtype()) {
   // Transducer models (parakeet) have a different file layout + engine — delegate.

@@ -106,6 +106,16 @@ const DEFAULTS = {
     diarize: true,
   },
 
+  // Local text-to-speech (read-aloud / voice out) — Kokoro via the same in-process
+  // ONNX engine and model dir as NER/STT (tts-engine.js). No autostart, same reason
+  // as stt: the model downloads on FIRST synthesis, never on gateway boot.
+  tts: {
+    enabled: true,
+    model: 'onnx-community/Kokoro-82M-v1.0-ONNX',
+    voice: 'af_heart',
+    allowDownload: true,
+  },
+
   // Log one line per request (method, tokens redacted) without any raw values.
   logRequests: true,
 

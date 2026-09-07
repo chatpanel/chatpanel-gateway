@@ -39,6 +39,8 @@ import * as sttEngine from './stt-engine.js';
 import * as diarizeEngine from './diarize-engine.js';
 import { MODEL_CATALOG, isKnownModel, isValidCustomModelId } from './models.js';
 import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MODEL, STT_DTYPES, isValidDtype } from './stt-models.js';
+import * as ttsEngine from './tts-engine.js';
+import { TTS_MODEL_CATALOG, TTS_VOICES, isKnownTtsModel, isValidCustomTtsId, isKnownVoice, isValidVoiceId, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, TTS_DTYPES, isValidTtsDtype, MAX_TTS_CHARS } from './tts-models.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, applyNerModelSelection, persistConfig, configPath } from './configstore.js';
 import { resolveDestination, aggregateModelsAsync, listDestinations } from './router.js';
@@ -49,7 +51,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.49';
+export const VERSION = '0.6.50';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -583,11 +585,15 @@ export function createGateway(cfg = loadConfig()) {
       // to auto-detect local dictation. `enabled` reflects config; the model only
       // downloads on first use, so state may be 'off' while still available.
       const stt = sttEngine.health();
+      const tts = ttsEngine.health();
       return sendJson(res, 200, {
         ok: true, version: VERSION, backend: cfg.backend, tier: cfg.redaction.tier,
         // `runtime` = 'native' (npm, fast quantized) | 'wasm' (binary, slow fp32) —
         // the extension uses it to advise the far-faster native gateway.
         stt: { enabled: cfg.stt?.enabled !== false, state: stt.state, ready: stt.ok, model: stt.model || cfg.stt?.model || DEFAULT_STT_MODEL, runtime: stt.runtime, dtype: stt.dtype },
+        // `tts` is ADDITIVE the same way: an older extension ignores it, a newer
+        // one uses it to offer local read-aloud instead of browser speech.
+        tts: { enabled: cfg.tts?.enabled !== false, state: tts.state, ready: tts.ok, model: tts.model || cfg.tts?.model || DEFAULT_TTS_MODEL, voice: cfg.tts?.voice || DEFAULT_TTS_VOICE, runtime: tts.runtime, dtype: tts.dtype },
       });
     }
 
@@ -958,6 +964,96 @@ export function createGateway(cfg = loadConfig()) {
         return sendJson(res, 202, { accepted: true, active: diarizeEngine.DIARIZE_MODEL, state: diarizeEngine.state(), progress: diarizeEngine.progress() });
       }
     }
+    // --- Local text-to-speech (voice out). Kokoro runs IN-PROCESS (tts-engine.js),
+    // so audio is synthesized on this machine and never leaves it. Phase 4 of
+    // docs/voice-pipeline.md. Model manager first, then synthesis.
+    if (pathname === '/tts/models') {
+      if (req.method === 'GET') {
+        const active = ttsEngine.health().model || cfg.tts?.model || DEFAULT_TTS_MODEL;
+        const available = /** @type {any[]} */ (TTS_MODEL_CATALOG.map((m) => ({ ...m, installed: ttsEngine.modelOnDisk(m.id) })));
+        if (active && !available.some((m) => m.id === active)) {
+          available.push({ id: active, label: active, lang: '—', tier: 'custom', custom: true, installed: ttsEngine.modelOnDisk(active), note: 'Custom model (from Hugging Face).' });
+        }
+        return sendJson(res, 200, {
+          active,
+          state: ttsEngine.state(),
+          progress: ttsEngine.progress(),
+          available,
+          voice: cfg.tts?.voice || DEFAULT_TTS_VOICE,
+          // Each voice is a separate ~500 KB style bank, so `installed` is per-voice.
+          voices: TTS_VOICES.map((v) => ({ ...v, installed: ttsEngine.voiceOnDisk(v.id, active) })),
+          dtype: cfg.tts?.dtype || 'auto',
+          loadedDtype: ttsEngine.health().dtype,
+          runtime: ttsEngine.health().runtime,
+          dtypes: TTS_DTYPES,
+        });
+      }
+      if (req.method === 'POST') {
+        let body = null;
+        try { body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')); } catch { body = null; }
+        const id = body && typeof body.id === 'string' ? body.id.trim() : null;
+        if (id && !(isKnownTtsModel(id) || isValidCustomTtsId(id))) return sendJson(res, 400, { error: { message: 'unknown or invalid model id', type: 'bad_model' } });
+        // A voice id becomes a filename, so it is checked against the catalog AND
+        // its shape before it is ever persisted.
+        const voice = body && typeof body.voice === 'string' ? body.voice.trim() : null;
+        if (voice && !(isKnownVoice(voice) && isValidVoiceId(voice))) return sendJson(res, 400, { error: { message: 'unknown or invalid voice', type: 'bad_voice' } });
+        const dtype = body && typeof body.dtype === 'string' && isValidTtsDtype(body.dtype) ? body.dtype : undefined;
+        if (!cfg.tts) cfg.tts = { enabled: true, model: DEFAULT_TTS_MODEL, voice: DEFAULT_TTS_VOICE, allowDownload: true };
+        if (id) cfg.tts.model = id;
+        if (voice) cfg.tts.voice = voice;
+        if (dtype) cfg.tts.dtype = dtype === 'auto' ? null : dtype;
+        try { persistConfig(cfg, configPath()); } catch { /* best effort */ }
+        if (id) ttsEngine.setModel(id, { onLog: (m) => console.log(m), dtype: dtype || cfg.tts.dtype || 'auto' });
+        return sendJson(res, 202, { accepted: true, active: cfg.tts.model, voice: cfg.tts.voice, dtype: cfg.tts.dtype || 'auto', state: ttsEngine.state(), progress: ttsEngine.progress() });
+      }
+    }
+
+    // POST /tts — { text, voice?, speed? } → audio/wav — and its OpenAI-compatible
+    // twin POST /v1/audio/speech ({ input, voice, speed, response_format }), so any
+    // OpenAI client or tunnel can drive local speech with no ChatPanel-specific code.
+    // Both go through ONE handler: two routes must never drift into two behaviours.
+    //
+    // Deliberately NOT redacted. Every other stage in the voice pipeline redacts at
+    // the model-send chokepoint because the text is about to leave the machine;
+    // synthesis is local, so there is nothing to protect it from — and reading
+    // "[[PERSON_1]]" aloud to the person who wrote it is a bug, not privacy.
+    if ((pathname === '/tts' || pathname === '/v1/audio/speech') && req.method === 'POST') {
+      if (cfg.tts?.enabled === false) return sendJson(res, 503, { error: { message: 'tts is disabled in gateway config', type: 'tts_disabled' } });
+      let body = null;
+      try { body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')); } catch { body = null; }
+      // `input` is OpenAI's field name, `text` is ours — accept either on both routes.
+      const text = body && typeof (body.input ?? body.text) === 'string' ? String(body.input ?? body.text).trim() : '';
+      if (!text) return sendJson(res, 400, { error: { message: 'text is required', type: 'bad_request' } });
+      if (text.length > MAX_TTS_CHARS) return sendJson(res, 413, { error: { message: `text too long (max ${MAX_TTS_CHARS} chars)`, type: 'too_long' } });
+      const voice = body && typeof body.voice === 'string' && body.voice.trim() ? body.voice.trim() : (cfg.tts?.voice || DEFAULT_TTS_VOICE);
+      if (!(isKnownVoice(voice) && isValidVoiceId(voice))) return sendJson(res, 400, { error: { message: 'unknown or invalid voice', type: 'bad_voice' } });
+      const speed = Number.isFinite(body.speed) ? Math.min(2, Math.max(0.5, body.speed)) : 1;
+      // We synthesize WAV only. Say so rather than returning WAV bytes under an mp3
+      // content-type — a client that trusts the header would play noise.
+      const fmt = body && typeof body.response_format === 'string' ? body.response_format.toLowerCase() : 'wav';
+      if (fmt !== 'wav' && fmt !== 'pcm') return sendJson(res, 400, { error: { message: `unsupported response_format "${fmt}" — this gateway synthesizes wav`, type: 'bad_format' } });
+      try {
+        const ok = await ttsEngine.ready({
+          onLog: (m) => console.log(m),
+          allowDownload: cfg.tts?.allowDownload !== false,
+          model: cfg.tts?.model || DEFAULT_TTS_MODEL,
+          dtype: cfg.tts?.dtype || 'auto',
+        });
+        if (!ok) return sendJson(res, 503, { error: { message: ttsEngine.health().error || 'tts model not ready', type: 'tts_unavailable' } });
+        const pcm = await ttsEngine.synth(text, { voice, speed });
+        const out = fmt === 'pcm' ? Buffer.from(new Float32Array(pcm).buffer) : ttsEngine.toWav(pcm);
+        res.writeHead(200, {
+          'Content-Type': fmt === 'pcm' ? 'application/octet-stream' : 'audio/wav',
+          'Content-Length': String(out.length),
+          'Cache-Control': 'no-store',
+          'X-Tts-Sample-Rate': String(ttsEngine.SAMPLE_RATE),
+        });
+        return res.end(out);
+      } catch (e) {
+        return sendJson(res, 500, { error: { message: e.message, type: 'tts_failed' } });
+      }
+    }
+
     if (pathname === '/stt/sessions' && req.method === 'POST') {
       if (cfg.stt?.enabled === false) return sendJson(res, 403, { error: { message: 'STT disabled in gateway config', type: 'stt_disabled' } });
       let body = null;
