@@ -111,9 +111,23 @@ const DEFAULTS = {
   // as stt: the model downloads on FIRST synthesis, never on gateway boot.
   tts: {
     enabled: true,
+    // 'local' = Kokoro in this process, nothing leaves the machine (the default).
+    // 'openai' | 'elevenlabs' = a remote voice. Auth is passed through from the
+    // client as everywhere else here; no key is stored. See src/tts-remote.js for
+    // why remote synthesis redacts by default and what that costs.
+    provider: 'local',
     model: 'onnx-community/Kokoro-82M-v1.0-ONNX',
     voice: 'af_heart',
     allowDownload: true,
+    remote: {
+      baseUrl: '',   // '' = the provider's own default endpoint
+      model: '',
+      voice: '',
+      // Redact before the text leaves this machine. Audio cannot be un-redacted,
+      // so this genuinely means the voice says "PERSON_1" — set false only if you
+      // accept sending real values to the vendor.
+      redact: true,
+    },
   },
 
   // Log one line per request (method, tokens redacted) without any raw values.

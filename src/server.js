@@ -41,6 +41,7 @@ import { MODEL_CATALOG, isKnownModel, isValidCustomModelId } from './models.js';
 import { STT_MODEL_CATALOG, isKnownSttModel, isValidCustomSttId, DEFAULT_STT_MODEL, STT_DTYPES, isValidDtype } from './stt-models.js';
 import * as ttsEngine from './tts-engine.js';
 import { TTS_MODEL_CATALOG, TTS_VOICES, isKnownTtsModel, isValidCustomTtsId, isKnownVoice, isValidVoiceId, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE, TTS_DTYPES, isValidTtsDtype, MAX_TTS_CHARS } from './tts-models.js';
+import { ttsDestination, synthesizeRemote, isValidRemoteVoice } from './tts-remote.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
 import { publicConfig, applyConfigPatch, applyNerModelSelection, persistConfig, configPath } from './configstore.js';
 import { resolveDestination, aggregateModelsAsync, listDestinations } from './router.js';
@@ -51,7 +52,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.50';
+export const VERSION = '0.6.51';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -1025,14 +1026,41 @@ export function createGateway(cfg = loadConfig()) {
       const text = body && typeof (body.input ?? body.text) === 'string' ? String(body.input ?? body.text).trim() : '';
       if (!text) return sendJson(res, 400, { error: { message: 'text is required', type: 'bad_request' } });
       if (text.length > MAX_TTS_CHARS) return sendJson(res, 413, { error: { message: `text too long (max ${MAX_TTS_CHARS} chars)`, type: 'too_long' } });
-      const voice = body && typeof body.voice === 'string' && body.voice.trim() ? body.voice.trim() : (cfg.tts?.voice || DEFAULT_TTS_VOICE);
-      if (!(isKnownVoice(voice) && isValidVoiceId(voice))) return sendJson(res, 400, { error: { message: 'unknown or invalid voice', type: 'bad_voice' } });
       const speed = Number.isFinite(body.speed) ? Math.min(2, Math.max(0.5, body.speed)) : 1;
+      const dest = ttsDestination(cfg);
+      // A remote destination has its own voice namespace (an ElevenLabs voice id is
+      // not a Kokoro one), so the local catalog check would reject every valid id.
+      const rawVoice = body && typeof body.voice === 'string' && body.voice.trim() ? body.voice.trim() : null;
+      const voice = rawVoice || (dest ? dest.voice : (cfg.tts?.voice || DEFAULT_TTS_VOICE));
+      const voiceOk = dest ? isValidRemoteVoice(voice) : (isKnownVoice(voice) && isValidVoiceId(voice));
+      if (!voiceOk) return sendJson(res, 400, { error: { message: 'unknown or invalid voice', type: 'bad_voice' } });
       // We synthesize WAV only. Say so rather than returning WAV bytes under an mp3
       // content-type — a client that trusts the header would play noise.
       const fmt = body && typeof body.response_format === 'string' ? body.response_format.toLowerCase() : 'wav';
       if (fmt !== 'wav' && fmt !== 'pcm') return sendJson(res, 400, { error: { message: `unsupported response_format "${fmt}" — this gateway synthesizes wav`, type: 'bad_format' } });
       try {
+        // Remote destination: the caller's own auth goes upstream, the text is
+        // redacted first unless this destination explicitly opted out, and the
+        // vendor's own audio format is passed straight through rather than
+        // re-wrapped — we did not synthesize it and must not claim its container.
+        if (dest) {
+          const { audio, contentType, redacted } = await synthesizeRemote({
+            dest, text, voice, speed,
+            auth: req.headers.authorization || req.headers['xi-api-key'] || '',
+            redaction: cfg.redaction,
+            isPro: await resolvePro(cfg.pro?.entitlementToken),
+          });
+          res.writeHead(200, {
+            'Content-Type': contentType,
+            'Content-Length': String(audio.length),
+            'Cache-Control': 'no-store',
+            // Say what actually left. A caller that asked for privacy can verify it,
+            // and one that turned it off can see that it is off.
+            'X-Tts-Provider': dest.kind,
+            'X-Tts-Redacted': String(redacted),
+          });
+          return res.end(audio);
+        }
         const ok = await ttsEngine.ready({
           onLog: (m) => console.log(m),
           allowDownload: cfg.tts?.allowDownload !== false,
