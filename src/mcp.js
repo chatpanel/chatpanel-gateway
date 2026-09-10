@@ -18,6 +18,7 @@ import { loadConfig } from './config.js';
 import { readBridgeToken } from './bridge.js';
 import { ensureGatewayToken } from './gateway-token.js';
 import { MEMORY_KINDS, MEMORY_KIND_NAMES } from './memory.js';
+import { parseBriefText } from './knowledge.js';
 
 const PROTOCOL_VERSION = '2024-11-05';
 const SERVER = { name: 'chatpanel-history', version: '1.0.0' };
@@ -118,13 +119,13 @@ async function bridgeJson(path) {
 const TOOLS = [
   {
     name: 'smart_search',
-    description: 'BEST first choice for a question about the user\'s ChatPanel history (meetings, notes, past chats). Ask it a natural-language QUESTION and it expands that into several complementary keyword queries, runs them all, and fuses the rankings — which finds things a single query misses, in one round trip instead of several probes. You know the domain, so pass 2-4 of your own phrasings in `queries` too (e.g. for "what did we decide in the Ben demo": ["Ben demo decisions", "tooling demo action items", "demo outcome next steps"]). Supports the same filters as search_history (type, since, before) and returns snippets with each result\'s id; follow up with get_record for the full text or find_related to expand around a hit.',
+    description: 'BEST first choice for a question about the user\'s ChatPanel history (meetings, notes, past chats). Ask it a natural-language QUESTION and it expands that into several complementary keyword queries, runs them all, and fuses the rankings — which finds things a single query misses, in one round trip instead of several probes. You know the domain, so pass 2-4 of your own phrasings in `queries` too (e.g. for "what did we decide in the Ben demo": ["Ben demo decisions", "tooling demo action items", "demo outcome next steps"]). Supports the same filters as search_history (type, since, before) and returns snippets with each result\'s id; follow up with get_record for the full text or find_related to expand around a hit. BRIEFS come first when they match: a brief is a maintained page about one person, project or topic, derived from ALL the records that mention it, with every claim citing its record — so for "what do we know about X" read the brief, then open only the records it cites.',
     inputSchema: {
       type: 'object',
       properties: {
         question: { type: 'string', description: 'The user\'s question, in natural language.' },
         queries: { type: 'array', items: { type: 'string' }, description: 'Your own 2-4 keyword formulations of it — these lead the search.' },
-        type: { type: 'string', enum: ['chat', 'meeting', 'note'], description: 'Only this kind of record.' },
+        type: { type: 'string', enum: ['brief', 'chat', 'meeting', 'note'], description: 'Only this kind of record. `brief` = a maintained page about one person/project/topic, with every claim cited — start there for "what do we know about X".' },
         since: { type: 'string', description: 'Earliest date: 2026-08-01, or a window like "7d"/"yesterday".' },
         before: { type: 'string', description: 'Latest date: a date or window like `since`.' },
         limit: { type: 'number', description: 'Max fused results (default 10).' },
@@ -139,7 +140,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Content keywords (topics, names, decisions) — not the meeting title.' },
-        type: { type: 'string', enum: ['chat', 'meeting', 'note'], description: 'Only this kind of record.' },
+        type: { type: 'string', enum: ['brief', 'chat', 'meeting', 'note'], description: 'Only this kind of record. `brief` = a maintained page about one person/project/topic, with every claim cited — start there for "what do we know about X".' },
         since: { type: 'string', description: 'Earliest date: 2026-08-01, or a relative window like "7d", "2 weeks", "yesterday".' },
         before: { type: 'string', description: 'Latest date: a date or relative window like `since`.' },
         limit: { type: 'number', description: 'Max results (default 10).' },
@@ -182,6 +183,28 @@ const TOOLS = [
         limit: { type: 'number', description: 'Max items (default 50).' },
         offset: { type: 'number', description: 'Skip N items for paging (default 0).' },
       },
+    },
+  },
+  {
+    name: 'list_briefs',
+    description: 'The BRIEFS ChatPanel maintains — one page per person, project or topic that appears across enough records, each claim citing the record it came from. This is the index of what the user\'s corpus KNOWS, as opposed to what it merely contains: read it before asking "what do we know about X", then get_brief for the one you need. Briefs are rebuilt from the records, so they are as current as the last rebuild (dates shown).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Max briefs (default 50).' },
+        offset: { type: 'number', description: 'Skip N for paging (default 0).' },
+      },
+    },
+  },
+  {
+    name: 'get_brief',
+    description: 'One brief as STRUCTURE: the subject, its other spellings, and each claim with the record ids it cites — so you can cite the record rather than the synthesis, and open only what you need with get_record. Prefer this over get_record for a brief:… id; get_record returns the same text as prose.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'A brief id (brief:…) from list_briefs or search results.' },
+      },
+      required: ['id'],
     },
   },
   {
@@ -366,6 +389,32 @@ async function callTool(name, args = {}) {
     if (!items.length) return 'History is empty (or the gateway has not been seeded yet — open ChatPanel with warm sync enabled).';
     const newest = items[0]?.date || null;
     return [horizonLine(newest, data.total), '', `${items.length} of ${data.total} records:`, ...items.map((it) => `[${it.id}] ${it.title || '(untitled)'} · ${it.type}${it.date ? ' · ' + new Date(it.date).toISOString().slice(0, 10) : ''} · ${it.chars} chars`)].join('\n');
+  }
+  if (name === 'list_briefs') {
+    const q = new URLSearchParams({ limit: String(Number(args.limit) || 50), offset: String(Number(args.offset) || 0), type: 'brief' });
+    const data = await gatewayJson(`/v1/history/list?${q}`);
+    const items = data.items || [];
+    if (!items.length) return 'No briefs yet. ChatPanel builds them from the user\'s records on the Briefs page; if that has run, the user may have "share briefs with local agents" switched off.';
+    return [
+      `${items.length} of ${data.total} briefs (each is a page about one subject, with every claim cited):`,
+      ...items.map((it) => `[${it.id}] ${it.title || '(untitled)'}${it.date ? ' · rebuilt ' + new Date(it.date).toISOString().slice(0, 10) : ''}`),
+    ].join('\n') + '\n\nget_brief <id> for its claims and the records they cite.';
+  }
+  if (name === 'get_brief') {
+    const id = String(args.id || '');
+    const data = await gatewayJson(`/v1/history/get?${new URLSearchParams({ id })}`);
+    const r = data.record;
+    const brief = parseBriefText(r?.text);
+    if (!brief) return `${id} is not a brief (type ${r?.type || 'unknown'}). Use get_record for it, or list_briefs for the brief ids.`;
+    const lines = [`BRIEF ${id} — ${brief.name} (${brief.kind})${brief.aliases.length ? ` · also known as ${brief.aliases.join(', ')}` : ''}`, ''];
+    lines.push(`${brief.claims.length} claim(s), each with the records it cites:`);
+    for (const c of brief.claims) {
+      lines.push(`• ${c.text}`);
+      if (c.refs.length) lines.push(`    cites: ${c.refs.map((x) => `${x.kind}:${x.id}`).join(', ')}`);
+    }
+    if (brief.records.length) lines.push('', `Built from ${brief.records.length} record(s) (most recent first): ${brief.records.slice(0, 12).map((x) => x.title).join(' · ')}${brief.records.length > 12 ? ' …' : ''}`);
+    lines.push('', 'get_record <kind:id> opens a cited record; find_related <id> follows its connections.');
+    return lines.join('\n');
   }
   if (name === 'recall') {
     const data = await gatewayJson('/v1/memory/recall', {

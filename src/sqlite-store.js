@@ -172,9 +172,12 @@ export class SqliteHistoryStore {
     return rows.map((r) => ({ id: r.id, score: -r.b, title: r.title, type: r.type, date: r.date }));
   }
 
-  list({ limit = 50, offset = 0 } = {}) {
-    const total = this.db.get('SELECT COUNT(*) c FROM records')?.c || 0;
-    const items = this.db.all('SELECT id, title, type, date, chars FROM records ORDER BY date DESC LIMIT ? OFFSET ?', [limit, offset]);
+  // `type` is additive: list_briefs is "list, of type brief", not a second index.
+  list({ limit = 50, offset = 0, type = null } = {}) {
+    const where = type ? ' WHERE type = ?' : '';
+    const params = type ? [String(type)] : [];
+    const total = this.db.get(`SELECT COUNT(*) c FROM records${where}`, params)?.c || 0;
+    const items = this.db.all(`SELECT id, title, type, date, chars FROM records${where} ORDER BY date DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
     return { total, items };
   }
 

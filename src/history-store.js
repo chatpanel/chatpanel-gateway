@@ -216,8 +216,9 @@ export class HistoryStore {
   }
 
   // Metadata list for an external UI, newest first, paginated. No bodies.
-  list({ limit = 50, offset = 0 } = {}) {
+  list({ limit = 50, offset = 0, type = null } = {}) {
     const all = [...this.records.values()]
+      .filter((r) => !type || r.type === type)
       .map((r) => ({ id: r.id, title: r.title, type: r.type, date: r.date, chars: r.text.length }))
       .sort((a, b) => (b.date || 0) - (a.date || 0));
     return { total: all.length, items: all.slice(offset, offset + limit) };

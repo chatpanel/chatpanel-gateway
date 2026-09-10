@@ -55,7 +55,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.60';
+export const VERSION = '0.6.61';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -780,11 +780,19 @@ export function createGateway(cfg = loadConfig()) {
           before: body.before != null ? Number(body.before) : null,
         };
         const perQuery = Math.min(30, Math.max(5, Number(body.limit) || 10) * 2);
-        const results = await multiSearch(
+        const fused = await multiSearch(
           queries,
           (q) => historyStore.search(q, { limit: perQuery, ...filters }),
           { limit: Math.min(50, Math.max(1, Number(body.limit) || 10)) },
         );
+        // BRIEFS LEAD. A brief is the compaction: when one matches, it answers with what a
+        // dozen records say, with a citation to each, and reading it saves an agent opening
+        // the dozen. Stable-partitioned to the front rather than re-scored, so rank among
+        // briefs and rank among records are both untouched — and only when the caller has
+        // not asked for one type, which is a question about records, not about briefs.
+        const results = filters.type
+          ? fused
+          : [...fused.filter((r) => r.type === 'brief'), ...fused.filter((r) => r.type !== 'brief')];
         return sendJson(res, 200, {
           ok: true, size: historyStore.size, newest: historyStore.newest, queries, results,
         });
@@ -825,7 +833,8 @@ export function createGateway(cfg = loadConfig()) {
     if (pathname === '/v1/history/list' && req.method === 'GET') {
       const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 50));
       const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
-      return sendJson(res, 200, { ok: true, ...historyStore.list({ limit, offset }) });
+      const type = url.searchParams.get('type') || null;
+      return sendJson(res, 200, { ok: true, ...historyStore.list({ limit, offset, type }) });
     }
     if (pathname === '/v1/history/get' && req.method === 'GET') {
       const maxChars = url.searchParams.get('maxChars') != null ? Math.max(1, Number(url.searchParams.get('maxChars')) || 0) : null;

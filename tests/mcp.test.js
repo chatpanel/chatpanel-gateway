@@ -63,11 +63,12 @@ test('initialize returns instructions that steer history questions to the tools'
 });
 
 test('tools/list returns the history, memory and skill tools with schemas', async () => {
-  // One server, three things a local agent gets from ChatPanel: the user's HISTORY (what was
-  // said), their MEMORY (what is durably true of them), and the skills on this machine.
+  // One server, four things a local agent gets from ChatPanel: the user's HISTORY (what was
+  // said), their BRIEFS (what the corpus has been found to KNOW — maintained pages, every
+  // claim cited), their MEMORY (what is durably true of them), and the skills on this machine.
   const r = await handleRpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const names = r.result.tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['find_related', 'forget', 'get_record', 'list_history', 'list_skills', 'open_skill', 'read_skill_file', 'recall', 'remember', 'search_history', 'smart_search']);
+  assert.deepEqual(names, ['find_related', 'forget', 'get_brief', 'get_record', 'list_briefs', 'list_history', 'list_skills', 'open_skill', 'read_skill_file', 'recall', 'remember', 'search_history', 'smart_search']);
   for (const t of r.result.tools) assert.equal(t.inputSchema.type, 'object');
 });
 
@@ -215,4 +216,69 @@ test('the memory tools are advertised, and the instructions steer a model to the
   const init = await handleRpc({ jsonrpc: '2.0', id: 29, method: 'initialize', params: {} });
   assert.match(init.result.instructions, /MEMORY/, 'the host is told memory exists');
   assert.match(init.result.instructions, /call it EARLY/, 'and when to reach for it');
+});
+
+// ── briefs over MCP ──────────────────────────────────────────────────────────
+// A brief crosses the warm store as { id, title, type, date, text }. list_briefs is "list,
+// of type brief"; get_brief reads the claims and refs back out of the text — a grammar the
+// events package owns at both ends — so an agent cites the record, not the synthesis.
+const BRIEF_TEXT = [
+  'BRIEF: Alex Rivera', 'Also known as: alex', 'Kind: person', '',
+  '- Appears in 6 records — 6 meetings.', '  (meeting:m5, meeting:m4)',
+  '- Alex Rivera owns the Atlas rollback plan.', '  (memory:mem1)',
+  '', 'RECORDS:', '- meeting: Atlas review 5', '- meeting: Atlas review 4',
+].join('\n');
+
+test('list_briefs is the index of what the corpus KNOWS, and says when there is none', async () => {
+  mockGateway({ 'GET /v1/history/list': { ok: true, total: 2, items: [
+    { id: 'brief:person-alex-rivera-abc123', title: 'Alex Rivera', type: 'brief', date: Date.UTC(2026, 8, 9), chars: 300 },
+    { id: 'brief:topic-atlas-def456', title: 'atlas', type: 'brief', date: Date.UTC(2026, 8, 9), chars: 200 },
+  ] } });
+  try {
+    const r = await handleRpc({ jsonrpc: '2.0', id: 30, method: 'tools/call', params: { name: 'list_briefs', arguments: {} } });
+    const text = r.result.content[0].text;
+    assert.match(text, /2 of 2 briefs/);
+    assert.match(text, /\[brief:person-alex-rivera-abc123\] Alex Rivera · rebuilt 2026-09-09/);
+    assert.match(text, /get_brief <id>/, 'the next step is named');
+  } finally { globalThis.fetch = realFetch; }
+
+  mockGateway({ 'GET /v1/history/list': { ok: true, total: 0, items: [] } });
+  try {
+    const r = await handleRpc({ jsonrpc: '2.0', id: 31, method: 'tools/call', params: { name: 'list_briefs', arguments: {} } });
+    assert.match(r.result.content[0].text, /No briefs yet/);
+    assert.match(r.result.content[0].text, /share briefs with local agents/, 'the likely reason is named, not guessed at');
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('get_brief hands back claims with the records they cite — structure, not a blob', async () => {
+  mockGateway({ 'GET /v1/history/get': { ok: true, record: { id: 'brief:person-alex-rivera-abc123', title: 'Alex Rivera', type: 'brief', date: 1, text: BRIEF_TEXT, totalChars: BRIEF_TEXT.length, offset: 0, truncated: false } } });
+  try {
+    const r = await handleRpc({ jsonrpc: '2.0', id: 32, method: 'tools/call', params: { name: 'get_brief', arguments: { id: 'brief:person-alex-rivera-abc123' } } });
+    const text = r.result.content[0].text;
+    assert.match(text, /BRIEF brief:person-alex-rivera-abc123 — Alex Rivera \(person\) · also known as alex/);
+    assert.match(text, /2 claim\(s\)/);
+    assert.match(text, /• Alex Rivera owns the Atlas rollback plan\.\n    cites: memory:mem1/, 'each claim carries its refs');
+    assert.match(text, /cites: meeting:m5, meeting:m4/);
+    assert.match(text, /Built from 2 record\(s\)/);
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('get_brief on a record that is not a brief says so rather than inventing claims', async () => {
+  mockGateway({ 'GET /v1/history/get': { ok: true, record: { id: 'meeting:m1', title: 'Sync', type: 'meeting', date: 1, text: 'MEETING: Sync\n\nTRANSCRIPT:\nhello', totalChars: 30, offset: 0, truncated: false } } });
+  try {
+    const r = await handleRpc({ jsonrpc: '2.0', id: 33, method: 'tools/call', params: { name: 'get_brief', arguments: { id: 'meeting:m1' } } });
+    assert.match(r.result.content[0].text, /is not a brief \(type meeting\)/);
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('the type filter admits brief, and the tool copy tells an agent what a brief is', async () => {
+  const r = await handleRpc({ jsonrpc: '2.0', id: 34, method: 'tools/list', params: {} });
+  const tools = r.result.tools;
+  const names = tools.map((t) => t.name);
+  assert.ok(names.includes('list_briefs') && names.includes('get_brief'));
+  for (const n of ['search_history', 'smart_search']) {
+    const t = tools.find((x) => x.name === n);
+    assert.deepEqual(t.inputSchema.properties.type.enum, ['brief', 'chat', 'meeting', 'note'], `${n} must let an agent ask for briefs`);
+  }
+  assert.match(tools.find((x) => x.name === 'smart_search').description, /BRIEFS come first/, 'an agent that is never told briefs exist will never ask for one');
 });
