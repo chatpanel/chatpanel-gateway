@@ -14,7 +14,19 @@
 // runtime can't load block-quantized (q8/int8) or fp16 exports (see stt-engine
 // runtimeDtype). `.en` models are English-only and reject language/task options.
 
-export const DEFAULT_STT_MODEL = 'onnx-community/whisper-base';
+// THE SHIP DEFAULT. Parakeet rather than Whisper: several times faster at similar or
+// better accuracy, and multilingual, so dictation is good out of the box instead of good
+// after someone finds the model picker.
+//
+// Two costs, stated because they are real. It is a ~690 MB one-time download against
+// whisper-base's ~300 MB, so first dictation takes longer to become available. And
+// parakeet-engine.js fetches from Hugging Face directly rather than ChatPanel's CDN, so a
+// clean install's first dictation depends on huggingface.co — mirroring it on
+// dl.chatpanel.net removes that dependency and is a release chore, not a code change.
+//
+// `whisper-base` remains the small, mirrored fallback for anyone who wants dictation
+// working in seconds on a slow link.
+export const DEFAULT_STT_MODEL = 'istupakov/parakeet-tdt-0.6b-v3-onnx';
 
 export const STT_MODEL_CATALOG = [
   {
@@ -33,7 +45,7 @@ export const STT_MODEL_CATALOG = [
     tier: 'balanced',
     approxMB: 300,   // fp32 on WASM; ~80 on native q8
     ramMB: 700,
-    note: 'Default. Detects the spoken language automatically; good accuracy at real-time speed.',
+    note: 'Small and quick to install. Detects the spoken language automatically; good accuracy at real-time speed.',
   },
   {
     id: 'onnx-community/whisper-small',
@@ -64,16 +76,18 @@ export const STT_MODEL_CATALOG = [
     lang: '25 European languages (auto-detected)',
     tier: 'accurate',
     engine: 'parakeet-tdt',
-    recommended: true,   // our default recommendation: faster + more accurate than Whisper.
+    recommended: true,   // and the DEFAULT — faster + more accurate than Whisper.
     approxMB: 690,   // int8: encoder 652 + decoder_joint 18 + preprocessor
     ramMB: 1600,
     note: 'Recommended — NVIDIA Parakeet transducer. Several× faster than Whisper at similar or better accuracy, English + 24 EU languages. One-time download; best on the native (npm) gateway.',
   },
 ];
 
-// The model we steer users to (a bigger, on-demand download — NOT the boot default,
-// which stays a small model so first dictation works instantly). The settings UI
-// surfaces this so users can install it after the gateway is running.
+// The model we steer users to. It is now also DEFAULT_STT_MODEL — the two were split
+// while the default stayed small for a fast first run, and shipping the best model by
+// default is the call that closed that gap. Kept as its own export because the settings UI
+// marks a recommendation, and the two could diverge again (a heavier model that is worth
+// recommending but too big to default to).
 export const RECOMMENDED_STT_MODEL = 'istupakov/parakeet-tdt-0.6b-v3-onnx';
 
 // STT engine backing a model. Default 'whisper' = the transformers.js ASR pipeline;

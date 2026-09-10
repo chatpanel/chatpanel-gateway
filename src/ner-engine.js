@@ -17,11 +17,10 @@
 import os from 'node:os';
 import { join } from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
-import { isKnownModel } from './models.js';
+import { DEFAULT_MODEL, isMirroredModel } from './models.js';
 import { isLoopbackHost, isPrivateHost, isMetadataHost } from '@chatpanel/pii';
 import { verifyModelWeights } from './model-integrity.js';
 
-const DEFAULT_MODEL = 'Xenova/bert-base-NER';
 const DEFAULT_MODEL_HOST = 'https://dl.chatpanel.net/models/';
 
 // Where model weights are fetched from — ChatPanel's own edge-cached CDN by default,
@@ -230,7 +229,11 @@ async function loadModel(modelId, { log = () => {}, allowDownload = true } = {})
   // (ensureLib set that as remoteHost). A user's BYO id isn't mirrored, so fetch
   // it from Hugging Face directly — only for this load, then restore.
   const prevHost = lib.env.remoteHost;
-  const isCustom = !isKnownModel(modelId);
+  // Fetch from Hugging Face when the mirror cannot serve it — a user's own id, or a
+  // catalogued model that has not been uploaded to the CDN yet (models.js `mirrored`).
+  // Asking "is it in the catalogue" was the same question only while every catalogued
+  // model happened to be mirrored, and a catalogued-but-unmirrored one would have 404'd.
+  const isCustom = !isMirroredModel(modelId);
   if (!haveLocal && isCustom) { try { lib.env.remoteHost = 'https://huggingface.co/'; } catch { /* optional */ } }
 
   _state = haveLocal ? 'loading' : 'downloading';

@@ -8,6 +8,8 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
+import { DEFAULT_MODEL as DEFAULT_NER_MODEL } from './models.js';
+import { DEFAULT_STT_MODEL } from './stt-models.js';
 
 // Exported so tests can assert that every section here survives persistConfig's
 // allowlist — a new section that is not persisted reverts on restart, and that
@@ -90,19 +92,22 @@ export const DEFAULTS = {
   // Fails open: if the model can't load, the gateway runs deterministic-only.
   ner: {
     autostart: true,
-    model: 'Xenova/bert-base-NER',
+    // One definition, in models.js. It lived here, in models.js and in ner-engine.js at
+    // once — three constants for one default, which is three chances to move two of them.
+    model: DEFAULT_NER_MODEL,
     allowDownload: true,
     // Auto-bump redaction.tier to 'full' once the detector is ready (names/orgs).
     enableFullTier: true,
   },
 
-  // Local speech-to-text (dictation) — whisper via the same in-process ONNX engine
-  // and model dir as NER (stt-engine.js). No autostart on purpose: the model
-  // downloads on FIRST dictation, never on gateway boot (first-run load time).
-  // Multilingual default so the spoken language is auto-detected per segment.
+  // Local speech-to-text (dictation) — the in-process ONNX engine and model dir shared
+  // with NER (stt-engine.js). No autostart on purpose: the model downloads on FIRST
+  // dictation, never on gateway boot (first-run load time). The default is Parakeet, which
+  // is multilingual and several times faster than Whisper — see stt-models.js for what
+  // that costs on a first run.
   stt: {
     enabled: true,
-    model: 'onnx-community/whisper-base',
+    model: DEFAULT_STT_MODEL,
     allowDownload: true,
     // Speaker diarization ("who said what") is an OPT-IN per-session stage (its
     // model loads only when a session asks). Set false to disable it gateway-wide.
