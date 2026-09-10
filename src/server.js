@@ -55,7 +55,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.61';
+export const VERSION = '0.6.62';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -907,6 +907,47 @@ export function createGateway(cfg = loadConfig()) {
         }
       }
     }
+    // WHAT THE MODEL WOULD RECEIVE. A client asks "if I sent this, what leaves the
+    // machine?" and gets back the redacted text plus the token→type map.
+    //
+    // WHY THIS IS A GATEWAY ROUTE AND NOT A CLIENT FUNCTION. A preview computed in the
+    // client is a SECOND redactor, and the day the two disagree the client is confidently
+    // showing the user something other than what was sent — which is worse than showing
+    // nothing, because it is believed. This runs the SAME redactSegments over the SAME
+    // config, tier, dictionary and detector as a real request, so it cannot drift: if the
+    // preview is wrong, the redaction is wrong too, and that is one bug rather than two.
+    //
+    // Real values NEVER appear in the response. The mapping is token→type only ('types'),
+    // never the 'values' detail an operator can opt into for their own logs: this answer
+    // crosses a process boundary to a UI, and the client already has the original text.
+    // The vault is discarded when this returns, so these tokens are not reusable.
+    if (pathname === '/redact' && req.method === 'POST') {
+      let text = '';
+      try { text = String(JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8'))?.text || ''); }
+      catch { text = ''; }
+      if (!text) return sendJson(res, 200, { text: '', count: 0, sanitized: 0, entities: [] });
+      try {
+        let out = text;
+        const isPro = await resolvePro(cfg.pro?.entitlementToken);
+        const r = await redactSegments(
+          [segment(() => out, (v) => { out = v; })],
+          cfg.redaction,
+          { isPro },
+        );
+        return sendJson(res, 200, {
+          text: out,
+          count: r.count || 0,
+          sanitized: r.sanitized || 0,
+          tier: cfg.redaction?.tier === 'full' ? 'full' : 'basic',
+          entities: redactionDetail(r.vault, 'types') || [],
+        });
+      } catch (e) {
+        // Fail LOUD. A preview that silently returns the original text would tell the user
+        // "nothing here is sensitive" at the exact moment redaction is broken.
+        return sendJson(res, 500, { error: { message: `redaction preview failed: ${e.message}`, type: 'redact_error' } });
+      }
+    }
+
     // Model manager (the extension's Gateway settings drive these). GET lists the
     // catalog with install state + live download progress; POST switches the active
     // model (downloading it first if needed) and persists the choice.
