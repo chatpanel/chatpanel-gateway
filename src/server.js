@@ -55,7 +55,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.62';
+export const VERSION = '0.6.63';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.

@@ -20,7 +20,14 @@ import * as engine from './ner-engine.js';
 // quality — free requests get the full tier (names/orgs via NER) within their
 // allowance. The custom dictionary is capped for free: gatedDictionary limits it
 // to FREE_DICT_LIMIT via the shared chatpanel-pii gate.
-export async function redactSegments(segments, redactionCfg, { signal, isPro = true, onEgress = null, fetchImpl: fetchOverride = null } = {}) {
+export async function redactSegments(segments, redactionCfg, {
+  signal, isPro = true, onEgress = null, fetchImpl: fetchOverride = null,
+  // The bundled detector, INJECTED rather than reached for. An ES module namespace cannot
+  // be monkey-patched, so with a hard import there is no way to ask "does an entity the
+  // engine found actually come out the other side as a token" without downloading a model.
+  // That question went unasked for exactly that reason, and the answer was no.
+  nerEngine = engine,
+} = {}) {
   const vault = createVault();
 
   // De-steganography FIRST (before detection). Invisible/format Unicode is a triple
@@ -51,7 +58,7 @@ export async function redactSegments(segments, redactionCfg, { signal, isPro = t
   // @chatpanel/pii's caching / timeout / type-gating — one source of truth.
   const det = redactionCfg.detection;
   const useExternal = !!(det && det.backend && det.backend !== 'off');
-  const useEngine = !useExternal && engine.isReady();
+  const useEngine = !useExternal && nerEngine.isReady();
 
   let entities = [];
   if (tier === 'full' && (useExternal || useEngine)) {
@@ -61,12 +68,18 @@ export async function redactSegments(segments, redactionCfg, { signal, isPro = t
     // under a second, but a cold one must be allowed to finish; on timeout the turn
     // falls back to dictionary/deterministic-only redaction.
     const detection = useEngine
-      ? { backend: 'endpoint', url: 'inproc:ner', timeoutMs: 30000, maxChars: 8000, types: det?.types }
+      // `transport: 'in-process'` is load-bearing, not decoration. Without it the sentinel
+      // URL below fails @chatpanel/pii's SSRF scheme check, the throw is swallowed by the
+      // fail-open path, and the bundled engine contributes NOTHING to any redaction while
+      // reporting itself ready — names and organisations reach the model in full under a
+      // config that says "full". The flag is only honoured alongside an injected fetch,
+      // which is `engine.fetchAdapter` on the next line.
+      ? { backend: 'endpoint', url: 'inproc:ner', transport: 'in-process', timeoutMs: 30000, maxChars: 8000, types: det?.types }
       : { ...det, timeoutMs: Math.max(Number(det.timeoutMs) || 0, 30000) };
     // The in-process engine is already injected this way; `fetchOverride` is the same seam
     // for a test, so the detector hop can be exercised without a network. Never used in
     // production — nothing passes it but tests.
-    const fetchImpl = useEngine ? engine.fetchAdapter : (fetchOverride || undefined);
+    const fetchImpl = useEngine ? nerEngine.fetchAdapter : (fetchOverride || undefined);
     try {
       entities = await detectEntities(texts.join('\n\n'), { detection }, {
         signal,
