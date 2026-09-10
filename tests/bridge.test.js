@@ -18,6 +18,14 @@ async function fakeBridge() {
   let seen = null;
   let auth = null;
   const s = createServer((req, res) => {
+    // A real bridge answers /health, and the gateway now asks it which agents are actually
+    // installed before listing them. This fixture used to treat EVERY request as a chat POST
+    // with a JSON body, so that GET landed in JSON.parse('') and hung the connection.
+    if ((req.method === 'GET') && req.url.startsWith('/health')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, version: '0.11.8', agents: [{ id: 'codex', available: true }] }));
+      return;
+    }
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {

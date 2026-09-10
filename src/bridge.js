@@ -67,9 +67,11 @@ export async function openBridgeChat({ bridgeUrl, agent, token, messages, system
   return res;
 }
 
-// Stream a turn through the bridge. Calls onText(restorableChunk) for each delta
+// Stream a turn through the bridge. Calls onText(restorableChunk) for each delta, and
+// onActivity(event) for everything else the agent reports — status lines, the working
+// directory, tool calls, reasoning.
 // of model text and returns the full (un-restored) text. Throws on bridge error.
-export async function streamBridgeChat({ bridgeUrl, agent, token, messages, system, options, signal }, onText) {
+export async function streamBridgeChat({ bridgeUrl, agent, token, messages, system, options, signal }, onText, onActivity = null) {
   const res = await fetch(`${bridgeUrl.replace(/\/$/, '')}/chat`, {
     method: 'POST',
     headers: {
@@ -118,8 +120,20 @@ export async function streamBridgeChat({ bridgeUrl, agent, token, messages, syst
         }
       } else if (evt.type === 'error') {
         err = new Error(evt.error || 'bridge error');
+      } else if (onActivity) {
+        // WHAT THE AGENT IS DOING, for a client that wants to show it.
+        //
+        // These used to be dropped with a comment calling them "the agent's local side
+        // effects". They are — and they are also the ONLY thing that happens for the ten
+        // seconds an agent spends reading files before it says a word. A client routed
+        // through this gateway saw a spinner and nothing else, while one talking to the
+        // bridge directly showed the work; that difference was pushing clients toward the
+        // direct path, which is the one with no redaction in it.
+        //
+        // Passed through as-is. Deciding here which of a coding agent's events are worth
+        // showing would be this file guessing at someone's UI.
+        onActivity(evt);
       }
-      // tool / reasoning / status events are the agent's local side effects — ignore.
     }
   };
 

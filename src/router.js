@@ -12,6 +12,7 @@
 //   }
 
 import { secureFetch } from './secure-fetch.js';
+import { readBridgeToken } from './bridge.js';
 //
 // /v1/models aggregates every destination's models so clients can discover them.
 
@@ -67,15 +68,67 @@ export function resolveDestination(model, cfg, kind, { destination = '' } = {}) 
 // Aggregate every destination's models for GET /v1/models. Agents expose their
 // own name as the model; APIs expose ONLY real model ids (never the destination
 // id — that's a provider name, not a model).
+/**
+ * WHICH API SHAPE A MODEL WANTS TO BE CALLED WITH.
+ *
+ * `owned_by` names the destination, which is a routing fact, not a calling convention — and
+ * a client needs the second one to build a request. Anthropic models take the Messages API;
+ * OpenAI-compatible ones take chat/completions (and the Responses API where the destination
+ * offers it); an agent takes neither, because the gateway synthesises the response itself
+ * from the bridge's stream.
+ *
+ * Stated here rather than inferred from the id in every client. Guessing from the name is
+ * how `claude` the local CLI agent gets called as if it were Anthropic's hosted API.
+ */
+function apiShapeOf(d) {
+  if (d.type === 'agent') return { api: 'agent', endpoints: ['/v1/chat/completions'] };
+  if (d.protocol === 'anthropic') return { api: 'anthropic', endpoints: ['/v1/messages'] };
+  return { api: 'openai', endpoints: ['/v1/chat/completions', '/v1/responses'] };
+}
+
 export function aggregateModels(cfg) {
   const data = [];
   const seen = new Set();
-  const add = (id, owner) => { if (id && !seen.has(id)) { seen.add(id); data.push({ id, object: 'model', owned_by: owner }); } };
+  const add = (id, owner, d) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    const shape = apiShapeOf(d);
+    data.push({
+      id,
+      object: 'model',
+      owned_by: owner,
+      // Additive fields an OpenAI client ignores and a ChatPanel client uses to decide how
+      // to call, and to group a picker by provider instead of by a flat list of ids.
+      provider: d.id,
+      provider_type: d.type === 'agent' ? 'agent' : (d.protocol === 'anthropic' ? 'anthropic' : 'openai'),
+      api: shape.api,
+      endpoints: shape.endpoints,
+    });
+  };
   for (const d of listDestinations(cfg)) {
-    if (d.type === 'agent') for (const m of (d.models?.length ? d.models : [d.id])) add(m, 'chatpanel-bridge');
-    else for (const m of (d.models || [])) add(m, d.id);
+    if (d.type === 'agent') for (const m of (d.models?.length ? d.models : [d.id])) add(m, 'chatpanel-bridge', d);
+    else for (const m of (d.models || [])) add(m, d.id, d);
   }
   return { object: 'list', data };
+}
+
+/** id → installed, from the bridge's own /health. `null` when it could not be asked. */
+async function bridgeAgentAvailability(cfg, timeoutMs) {
+  const base = String(cfg?.bridge?.url || '').replace(/\/$/, '');
+  if (!base) return null;
+  try {
+    const token = readBridgeToken(cfg.bridge?.token);
+    const res = await fetch(`${base}/health`, {
+      headers: { Accept: 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    if (!Array.isArray(body?.agents)) return null;
+    return new Map(body.agents.map((a) => [a.id, !!a.available]));
+  } catch {
+    return null; // not reachable — say nothing rather than saying "none"
+  }
 }
 
 // Async variant: also PROXIES each API destination's own /v1/models to discover
@@ -83,6 +136,28 @@ export function aggregateModels(cfg) {
 export async function aggregateModelsAsync(cfg, { timeoutMs = 4000 } = {}) {
   const base = aggregateModels(cfg);
   const seen = new Set(base.data.map((m) => m.id));
+
+  // WHICH AGENTS ARE ACTUALLY ON THIS MACHINE.
+  //
+  // The list above is the ROUTING TABLE: it names every agent the gateway would route to,
+  // whether or not that CLI is installed. On a fresh machine that is a model picker full of
+  // names that all fail on first use, which is the worst possible first five minutes.
+  //
+  // Only the bridge knows what is on disk, so the gateway asks it — once, here — rather than
+  // every client asking separately. A client that had to check for itself would need the
+  // bridge's address and token as well as ours, and the direct-to-bridge path is the one
+  // with no policy in front of it; making it necessary is how it becomes the habit.
+  //
+  // `available` is left UNDEFINED when the bridge cannot be reached. Absent means "we did not
+  // find out", which is not the same as false, and a picker that greys out every agent
+  // because one health check timed out is worse than one that says nothing.
+  const agentAvailability = await bridgeAgentAvailability(cfg, timeoutMs);
+  if (agentAvailability) {
+    for (const m of base.data) {
+      if (m.owned_by === 'chatpanel-bridge') m.available = agentAvailability.get(m.id) ?? false;
+    }
+  }
+
   const dests = listDestinations(cfg).filter((d) => d.type === 'api' && d.baseUrl);
   await Promise.all(dests.map(async (d) => {
     const ctrl = new AbortController();
@@ -100,7 +175,15 @@ export async function aggregateModelsAsync(cfg, { timeoutMs = 4000 } = {}) {
       const list = Array.isArray(j?.data) ? j.data : (Array.isArray(j?.models) ? j.models : []);
       for (const m of list) {
         const id = typeof m === 'string' ? m : m?.id;
-        if (id && !seen.has(id)) { seen.add(id); base.data.push({ id, object: 'model', owned_by: d.id }); }
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          const shape = apiShapeOf(d);
+          base.data.push({
+            id, object: 'model', owned_by: d.id, provider: d.id,
+            provider_type: d.protocol === 'anthropic' ? 'anthropic' : 'openai',
+            api: shape.api, endpoints: shape.endpoints,
+          });
+        }
       }
     } catch { /* fail-open */ } finally { clearTimeout(t); }
   }));

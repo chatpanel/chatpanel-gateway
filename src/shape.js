@@ -38,6 +38,25 @@ export function openaiChat(model) {
     sseTail() {
       return sse({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) + 'data: [DONE]\n\n';
     },
+    /**
+     * What the agent is DOING, on a chunk an OpenAI client ignores.
+     *
+     * The chunk is well-formed and carries an empty delta, so a strict client sees a frame
+     * with nothing in it and moves on — which is what makes this additive rather than a
+     * change to the wire contract. A ChatPanel client reads the extra `chatpanel` key.
+     *
+     * This exists because an agent spends its first ten seconds reading files, and a client
+     * routed through the gateway had no way to know that while one talking to the bridge
+     * directly did. A protocol gap that rewards going around the redacting proxy is a
+     * security problem wearing a UI problem's clothes.
+     */
+    sseActivity(evt) {
+      return sse({
+        ...base,
+        choices: [{ index: 0, delta: {}, finish_reason: null }],
+        chatpanel: { kind: 'activity', event: evt },
+      });
+    },
     // Tool-relay (agent destinations): emit the agent's tool call as an OpenAI
     // tool_calls delta, then end the turn with finish_reason:tool_calls.
     sseToolCalls(calls) {

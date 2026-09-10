@@ -21,7 +21,7 @@ import { createServer } from 'node:http';
 import { loadConfig } from './config.js';
 import { startEntitlementRefresh, maybeRevalidate } from './entitlement-refresh.js';
 import { redactSegments, segment } from './redact.js';
-import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer } from './stream.js';
+import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer, restoreDeep } from './stream.js';
 import { restoreText, gatedDictionary, narrowSpecs, makeToolHarness, placeholderToolNote, assertEndpointUrl } from '@chatpanel/pii';
 import { ensureGatewayToken, isAdminAuthorized } from './gateway-token.js';
 import { secureFetch } from './secure-fetch.js';
@@ -55,7 +55,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.63';
+export const VERSION = '0.6.64';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -424,7 +424,19 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
       if (trace && first) { trace.lap('upstream', up0); sStart = trace.clock(); first = false; } // time-to-first-token
       const restored = restorer.push(chunk);
       if (restored) res.write(shaper.sseDelta(restored));
-    });
+    }, shaper.sseActivity ? (evt) => {
+      // Activity is the agent describing its own work, so it can name a file it read — and
+      // it was handed PLACEHOLDERS, so what it echoes contains them. It is restored like any
+      // other text on the way back: a status line is not a side channel that skips the
+      // round trip and shows the user "[[PERSON_1]].md".
+      //
+      // restoreDeep, NOT the streaming restorer above: that one holds a partial token across
+      // chunks, and pushing an unrelated object through it would splice activity text into
+      // the middle of the assistant's message.
+      try {
+        res.write(shaper.sseActivity(restoreDeep(evt, vault)));
+      } catch { /* a client that hung up mid-turn is not a reason to fail the turn */ }
+    } : null);
     const tail = restorer.flush();
     if (tail) res.write(shaper.sseDelta(tail));
     res.write(shaper.sseTail());
@@ -481,7 +493,7 @@ function resample(input, from, to) {
   return out;
 }
 
-const LOCAL_NAMESPACES = ['/tts', '/stt', '/ner', '/diarize', '/skills', '/config', '/logs', '/status', '/admin'];
+const LOCAL_NAMESPACES = ['/tts', '/stt', '/ner', '/diarize', '/skills', '/redact', '/config', '/logs', '/status', '/admin'];
 
 async function handleApi(req, res, { adapter, kind, pathname, search, base, destKey, destProtocol, harness, trace }, outBody, vault) {
   let upstream;
@@ -1485,6 +1497,30 @@ export function createGateway(cfg = loadConfig()) {
       }
       const proUnlocked = await resolvePro(cfg.pro?.entitlementToken);
       return sendJson(res, 200, publicConfig(cfg, { proUnlocked }));
+    }
+
+    // THE SKILLS ON THIS MACHINE, asked of the gateway rather than the bridge.
+    //
+    // The bridge is what reads the user's disk, so this proxies it — but a client should
+    // have ONE address for everything. A client that talks to the gateway for models and the
+    // bridge for skills has to know both are up, hold both tokens, and handle two failure
+    // modes for one screen; and the direct-to-bridge path is the one with no policy in front
+    // of it, so making it necessary for a feature is how it becomes the habit.
+    if (req.method === 'GET' && pathname === '/skills') {
+      const base = String(cfg.bridge?.url || '').replace(/\/$/, '');
+      if (!base) return sendJson(res, 503, { error: { message: 'no bridge is configured', type: 'no_bridge' } });
+      const token = readBridgeToken(cfg.bridge?.token);
+      try {
+        const r = await fetch(`${base}/skills`, {
+          headers: { Accept: 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          signal: AbortSignal.timeout(8000),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) return sendJson(res, r.status, { error: { message: data?.error || `bridge ${r.status}`, type: 'bridge_error' } });
+        return sendJson(res, 200, { skills: Array.isArray(data?.skills) ? data.skills : [] });
+      } catch (e) {
+        return sendJson(res, 502, { error: { message: `bridge unreachable: ${e.message}`, type: 'bridge_unreachable' } });
+      }
     }
 
     // Model discovery — aggregate every destination's models.
