@@ -55,7 +55,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.66';
+export const VERSION = '0.6.67';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -1547,6 +1547,37 @@ export function createGateway(cfg = loadConfig()) {
         const data = await r.json().catch(() => ({}));
         if (!r.ok) return sendJson(res, r.status, { error: { message: data?.error || `bridge ${r.status}`, type: 'bridge_error' } });
         return sendJson(res, 200, { skills: Array.isArray(data?.skills) ? data.skills : [] });
+      } catch (e) {
+        return sendJson(res, 502, { error: { message: `bridge unreachable: ${e.message}`, type: 'bridge_unreachable' } });
+      }
+    }
+
+    // ONE skill, with the prompt the list deliberately leaves out.
+    //
+    // /skills answers `promptChars` — a COUNT — because a list of ninety-five skills carrying
+    // ninety-five prompt bodies is a megabyte nobody asked for. A client that wants to scope a
+    // task to a skill needs the body itself, and the only other way to get it was to go
+    // straight at the bridge, which is the habit the /skills comment above exists to prevent.
+    //
+    // The id is passed through as ONE path segment, encoded. A skill id is a file name on the
+    // user's disk, so letting a slash or a `..` reach the bridge's reader would be asking it
+    // to open something else; the bridge validates too, and this is the half we own.
+    if (req.method === 'GET' && /^\/skills\/[^/]+$/.test(pathname)) {
+      const id = decodeURIComponent(pathname.slice('/skills/'.length));
+      if (!id || id === '.' || id === '..' || id.includes('/') || id.includes('\\')) {
+        return sendJson(res, 400, { error: { message: 'not a skill id', type: 'invalid_request' } });
+      }
+      const base = String(cfg.bridge?.url || '').replace(/\/$/, '');
+      if (!base) return sendJson(res, 503, { error: { message: 'no bridge is configured', type: 'no_bridge' } });
+      const token = readBridgeToken(cfg.bridge?.token);
+      try {
+        const r = await fetch(`${base}/skills/${encodeURIComponent(id)}`, {
+          headers: { Accept: 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          signal: AbortSignal.timeout(8000),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) return sendJson(res, r.status, { error: { message: data?.error || `bridge ${r.status}`, type: 'bridge_error' } });
+        return sendJson(res, 200, { skill: data?.skill || null });
       } catch (e) {
         return sendJson(res, 502, { error: { message: `bridge unreachable: ${e.message}`, type: 'bridge_unreachable' } });
       }

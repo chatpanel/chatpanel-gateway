@@ -192,6 +192,49 @@ test('/skills is served by the gateway, so a client needs one address and one to
   } finally { gw.close(); s.close(); }
 });
 
+test('one skill comes back WITH its prompt — the list only carries a character count', async () => {
+  // /skills answers promptChars because ninety-five prompt bodies is a megabyte nobody asked
+  // for. Scoping a task to a skill needs the body, and without this route the only way to get
+  // it is straight at the bridge — the habit the /skills route exists to prevent.
+  let asked = '';
+  const s = createServer((req, res) => {
+    asked = req.url;
+    if (req.url === '/skills/graphify') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, skill: { id: 'graphify', name: 'graphify', prompt: 'Turn the input into a graph.' } }));
+    }
+    res.writeHead(404); res.end('{}');
+  });
+  const port = await listen(s);
+  const gw = createGateway(cfg(port));
+  const gwPort = await listen(gw);
+  try {
+    const body = await (await fetch(`http://127.0.0.1:${gwPort}/skills/graphify`)).json();
+    assert.equal(body.skill.prompt, 'Turn the input into a graph.');
+    assert.equal(asked, '/skills/graphify');
+  } finally { gw.close(); s.close(); }
+});
+
+test('a skill id is a FILE NAME on the user’s disk, so a traversal never reaches the bridge', async () => {
+  let reached = false;
+  const s = createServer((req, res) => { reached = true; res.writeHead(200); res.end('{}'); });
+  const port = await listen(s);
+  const gw = createGateway(cfg(port));
+  const gwPort = await listen(gw);
+  try {
+    // Encoded so it arrives as ONE path segment and matches the route, rather than being
+    // rejected by the pattern — which is exactly the case the id check has to catch.
+    const r = await fetch(`http://127.0.0.1:${gwPort}/skills/${encodeURIComponent('../../etc/passwd')}`);
+    assert.equal(r.status, 400);
+    assert.equal((await r.json()).error.type, 'invalid_request');
+    assert.equal(reached, false, 'the bridge was never asked to open it');
+    // A bare `..` never reaches the route at all: URL parsing resolves the segment away, so
+    // the path stops being a /skills one. Safe by a different mechanism, and worth knowing —
+    // it is why the id check cannot be the only thing looked at when reading this route.
+    assert.equal(reached, false);
+  } finally { gw.close(); s.close(); }
+});
+
 test('a route this gateway does not have 404s with the REASON, not the model proxy’s error', async () => {
   // /redact reaching an older gateway fell through to the model proxy and came back as
   // "upstream fetch failed" — a missing feature reported as the user's endpoint being down.
