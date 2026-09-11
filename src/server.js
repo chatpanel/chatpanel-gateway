@@ -55,7 +55,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.64';
+export const VERSION = '0.6.65';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -204,8 +204,31 @@ function route(pathname, headers, cfg) {
   return { kind: 'openai', adapter: openai, redactable: openai.matches(pathname), base: cfg.upstreams?.openai?.baseUrl };
 }
 
+/**
+ * An agent id, and the model to run it with.
+ *
+ * A CLI agent is not one model. Claude Code takes `opus`, `sonnet` or `haiku`; the others
+ * have their own lists. Picking `claude` alone leaves the CLI on whatever default it has,
+ * which is how a user gets "this version does not support that model" from a tool they never
+ * chose a model for. So `claude/opus` names both, and the slash is the only new syntax.
+ *
+ * A bare agent id still works and still means "the agent's own default" — every client that
+ * predates this keeps working, which is the whole reason the model is a SUFFIX rather than a
+ * change to the id.
+ */
+export function parseAgentModel(model, cfg) {
+  const raw = String(model || '');
+  if (KNOWN_AGENTS.has(raw)) return { agent: raw, agentModel: '' };
+  const slash = raw.indexOf('/');
+  if (slash > 0) {
+    const head = raw.slice(0, slash);
+    if (KNOWN_AGENTS.has(head)) return { agent: head, agentModel: raw.slice(slash + 1) };
+  }
+  return { agent: cfg.bridge.agent, agentModel: '' };
+}
+
 function pickAgent(model, cfg) {
-  return KNOWN_AGENTS.has(model) ? model : cfg.bridge.agent;
+  return parseAgentModel(model, cfg).agent;
 }
 
 // A follow-up request carrying a tool result for a PARKED relay session. Such a
@@ -393,7 +416,13 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
   const ac = new AbortController();
   req.on('close', () => ac.abort());
 
-  const turn = { bridgeUrl: cfg.bridge.url, agent, token, messages, system, signal: ac.signal };
+  // The model half of `claude/opus`, handed to the CLI as its `--model`. Absent for a bare
+  // agent id, which leaves the agent on its own default exactly as before.
+  const { agentModel } = parseAgentModel(body?.model, cfg);
+  const turn = {
+    bridgeUrl: cfg.bridge.url, agent, token, messages, system, signal: ac.signal,
+    ...(agentModel ? { options: { model: agentModel } } : {}),
+  };
 
   if (!wantStream) {
     try {

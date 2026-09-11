@@ -239,3 +239,102 @@ test('every model says HOW to call it, not only who owns it', async () => {
     assert.equal(by('qwen3').provider, 'local');
   } finally { gw.close(); br.close(); }
 });
+
+// ---------------------------------------------------------------------------
+// An agent is not one model
+// ---------------------------------------------------------------------------
+
+test('agent/model parses, and a bare agent id still means its default', async () => {
+  const { parseAgentModel } = await import('../src/server.js');
+  const cfg = { bridge: { agent: 'codex' } };
+  assert.deepEqual(parseAgentModel('claude', cfg), { agent: 'claude', agentModel: '' });
+  assert.deepEqual(parseAgentModel('claude/opus', cfg), { agent: 'claude', agentModel: 'opus' });
+  assert.deepEqual(parseAgentModel('claude/claude-opus-4-8', cfg), { agent: 'claude', agentModel: 'claude-opus-4-8' });
+  // A hosted model id with a slash in it must NOT be read as an agent.
+  assert.deepEqual(parseAgentModel('openai/gpt-oss-20b', cfg), { agent: 'codex', agentModel: '' });
+  assert.deepEqual(parseAgentModel('', cfg), { agent: 'codex', agentModel: '' });
+});
+
+test('an installed agent lists its OWN models, beside the bare id', async () => {
+  const s = createServer((req, res) => {
+    if (req.url.startsWith('/health')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, agents: [{ id: 'claude', available: true }, { id: 'kiro', available: false }] }));
+    }
+    if (req.url.startsWith('/list-models')) {
+      const c = [];
+      req.on('data', (x) => c.push(x));
+      return req.on('end', () => {
+        const { agent } = JSON.parse(Buffer.concat(c).toString());
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ models: agent === 'claude' ? ['opus', 'sonnet', 'haiku'] : [] }));
+      });
+    }
+    res.writeHead(404); res.end('{}');
+  });
+  const port = await listen(s);
+  const gw = createGateway({
+    ...cfg(port),
+    destinations: [{ id: 'claude', type: 'agent', models: ['claude'] }, { id: 'kiro', type: 'agent', models: ['kiro'] }],
+  });
+  const gwPort = await listen(gw);
+  try {
+    const body = await (await fetch(`http://127.0.0.1:${gwPort}/v1/models`)).json();
+    const ids = body.data.map((m) => m.id);
+    assert.ok(ids.includes('claude'), 'the bare id survives — it means the agent default');
+    assert.ok(ids.includes('claude/opus'), 'and each model is offered');
+    assert.ok(ids.includes('claude/haiku'));
+
+    // They group under the agent without anyone parsing an id.
+    const opus = body.data.find((m) => m.id === 'claude/opus');
+    assert.equal(opus.provider, 'claude');
+    assert.equal(opus.provider_type, 'agent');
+    assert.equal(opus.model, 'opus');
+
+    // An agent that is NOT installed is not enumerated — a subprocess per agent to describe
+    // something unusable is not a cost worth paying.
+    assert.equal(ids.some((id) => id.startsWith('kiro/')), false);
+  } finally { gw.close(); s.close(); }
+});
+
+test('the chosen agent model reaches the bridge as an option', async () => {
+  let seenOptions = null;
+  const s = createServer((req, res) => {
+    if (req.url.startsWith('/health')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, agents: [{ id: 'claude', available: true }] }));
+    }
+    const c = [];
+    req.on('data', (x) => c.push(x));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(c).toString());
+      if (req.url.startsWith('/chat')) {
+        seenOptions = body.options;
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write(`data: ${JSON.stringify({ type: 'delta', text: 'ok' })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'done', text: '' })}\n\n`);
+        return res.end();
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ models: [] }));
+    });
+  });
+  const port = await listen(s);
+  const gw = createGateway(cfg(port));
+  const gwPort = await listen(gw);
+  try {
+    await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude/opus', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(seenOptions?.model, 'opus', 'the CLI is told which model to run');
+
+    // ...and a bare agent id sends NO model, leaving the CLI on its own default.
+    seenOptions = null;
+    await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(seenOptions?.model, undefined);
+  } finally { gw.close(); s.close(); }
+});

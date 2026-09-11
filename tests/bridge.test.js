@@ -23,7 +23,18 @@ async function fakeBridge() {
     // with a JSON body, so that GET landed in JSON.parse('') and hung the connection.
     if ((req.method === 'GET') && req.url.startsWith('/health')) {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, version: '0.11.8', agents: [{ id: 'codex', available: true }] }));
+      res.end(JSON.stringify({ ok: true, version: '0.11.9', agents: [{ id: 'codex', available: true }] }));
+      return;
+    }
+    // The gateway also asks an INSTALLED agent which models it takes, so `claude/opus` can
+    // be offered instead of a bare `claude` that runs on whatever default the CLI has.
+    if (req.url.startsWith('/list-models')) {
+      const drain = [];
+      req.on('data', (c) => drain.push(c));
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ models: [] }));
+      });
       return;
     }
     const chunks = [];

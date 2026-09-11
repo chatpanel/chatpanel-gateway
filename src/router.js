@@ -112,6 +112,44 @@ export function aggregateModels(cfg) {
   return { object: 'list', data };
 }
 
+/**
+ * The models each installed agent can be asked for.
+ *
+ * A CLI agent is not one model — Claude Code takes opus/sonnet/haiku, others enumerate their
+ * own — and listing only the agent id meant a user picked `claude` and got whatever default
+ * the CLI had. When that default is newer than the installed CLI, the answer is a version
+ * error about a model the user never chose.
+ *
+ * Asked of the bridge, which is the only thing that knows what each CLI supports, and only
+ * for agents that are actually INSTALLED: enumerating models for a CLI that is not there
+ * spends a subprocess per agent to describe something unusable.
+ */
+async function bridgeAgentModels(cfg, installed, timeoutMs) {
+  const base = String(cfg?.bridge?.url || '').replace(/\/$/, '');
+  if (!base || !installed) return new Map();
+  const token = readBridgeToken(cfg.bridge?.token);
+  const ids = [...installed.entries()].filter(([, ok]) => ok).map(([id]) => id);
+  const out = new Map();
+  await Promise.all(ids.map(async (id) => {
+    try {
+      const res = await fetch(`${base}/list-models`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ agent: id }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) return;
+      const body = await res.json();
+      const models = (Array.isArray(body?.models) ? body.models : [])
+        .map((m) => (typeof m === 'string' ? m : m?.id || m?.name || ''))
+        .map((m) => String(m).trim())
+        .filter(Boolean);
+      if (models.length) out.set(id, models.slice(0, 40));
+    } catch { /* an agent that will not enumerate still works under its bare id */ }
+  }));
+  return out;
+}
+
 /** id → installed, from the bridge's own /health. `null` when it could not be asked. */
 async function bridgeAgentAvailability(cfg, timeoutMs) {
   const base = String(cfg?.bridge?.url || '').replace(/\/$/, '');
@@ -155,6 +193,27 @@ export async function aggregateModelsAsync(cfg, { timeoutMs = 4000 } = {}) {
   if (agentAvailability) {
     for (const m of base.data) {
       if (m.owned_by === 'chatpanel-bridge') m.available = agentAvailability.get(m.id) ?? false;
+    }
+  }
+
+  // Each installed agent's own models, listed as `agent/model` beside the bare id. The bare
+  // id stays and still means "the agent's default", so nothing that already works breaks.
+  const agentModels = await bridgeAgentModels(cfg, agentAvailability, timeoutMs);
+  for (const [agent, models] of agentModels) {
+    const parent = base.data.find((m) => m.id === agent);
+    if (!parent) continue;
+    for (const model of models) {
+      const id = `${agent}/${model}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      base.data.push({
+        ...parent,
+        id,
+        // `model` is what the picker shows under the agent's heading; the agent stays the
+        // provider, so the grouping puts them together without any id parsing.
+        model,
+        available: true,
+      });
     }
   }
 
