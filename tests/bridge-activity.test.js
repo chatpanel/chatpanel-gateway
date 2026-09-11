@@ -338,3 +338,79 @@ test('the chosen agent model reaches the bridge as an option', async () => {
     assert.equal(seenOptions?.model, undefined);
   } finally { gw.close(); s.close(); }
 });
+
+// ---------------------------------------------------------------------------
+// A routing table is not a list of models that work
+// ---------------------------------------------------------------------------
+
+test('a provider with no key marks its models unconfigured, with the reason', async () => {
+  // The list names every model the gateway would FORWARD to. A provider configured with no
+  // key contributes hundreds of ids that answer `Missing Authentication header` — and the
+  // user finds out at 08:00, from a scheduled job, quoting undici about a destination they
+  // never knowingly chose.
+  const br = await fakeBridge([]);
+  const gw = createGateway({
+    ...cfg(br.port),
+    backend: 'api',
+    destinations: [
+      { id: 'OpenRouter', type: 'api', protocol: 'openai', baseUrl: 'https://openrouter.ai/api/v1', models: ['or/free'] },
+      { id: 'Keyed', type: 'api', protocol: 'openai', baseUrl: 'https://api.example.com/v1', apiKey: 'sk-x', models: ['keyed-1'] },
+    ],
+  });
+  const port = await listen(gw);
+  try {
+    const body = await (await fetch(`http://127.0.0.1:${port}/v1/models`)).json();
+    const free = body.data.find((m) => m.id === 'or/free');
+    assert.equal(free.configured, false);
+    assert.match(free.reason, /no API key is saved for OpenRouter/);
+
+    const keyed = body.data.find((m) => m.id === 'keyed-1');
+    assert.equal('configured' in keyed, false, 'a working provider says nothing — absent is fine');
+  } finally { gw.close(); br.close(); }
+});
+
+test('a LOCAL endpoint is never marked unconfigured — it needs no key', async () => {
+  // llama.cpp, Ollama and LM Studio take no credential. Greying them out would hide the one
+  // setup that requires nothing at all.
+  const br = await fakeBridge([]);
+  const gw = createGateway({
+    ...cfg(br.port),
+    backend: 'api',
+    destinations: [
+      { id: 'llama', type: 'api', protocol: 'openai', baseUrl: 'http://localhost:8080', models: ['local-1'] },
+      { id: 'lan', type: 'api', protocol: 'openai', baseUrl: 'http://studio.local:1234/v1', models: ['local-2'] },
+    ],
+  });
+  const port = await listen(gw);
+  try {
+    const body = await (await fetch(`http://127.0.0.1:${port}/v1/models`)).json();
+    assert.equal('configured' in body.data.find((m) => m.id === 'local-1'), false);
+    assert.equal('configured' in body.data.find((m) => m.id === 'local-2'), false);
+  } finally { gw.close(); br.close(); }
+});
+
+test('a destination with no URL at all says so rather than being offered', async () => {
+  const br = await fakeBridge([]);
+  const gw = createGateway({
+    ...cfg(br.port),
+    backend: 'api',
+    destinations: [{ id: 'half-done', type: 'api', protocol: 'openai', models: ['x-1'] }],
+  });
+  const port = await listen(gw);
+  try {
+    const body = await (await fetch(`http://127.0.0.1:${port}/v1/models`)).json();
+    const m = body.data.find((x) => x.id === 'x-1');
+    assert.equal(m.configured, false);
+    assert.match(m.reason, /no endpoint URL/);
+  } finally { gw.close(); br.close(); }
+});
+
+test('an AGENT is never judged on credentials — it has none', async () => {
+  const br = await fakeBridge([]);
+  const gw = createGateway({ ...cfg(br.port), destinations: [{ id: 'codex', type: 'agent', models: ['codex'] }] });
+  const port = await listen(gw);
+  try {
+    const body = await (await fetch(`http://127.0.0.1:${port}/v1/models`)).json();
+    assert.equal('configured' in body.data.find((m) => m.id === 'codex'), false);
+  } finally { gw.close(); br.close(); }
+});

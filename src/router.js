@@ -86,6 +86,32 @@ function apiShapeOf(d) {
   return { api: 'openai', endpoints: ['/v1/chat/completions', '/v1/responses'] };
 }
 
+/**
+ * CAN THIS DESTINATION ANSWER AT ALL — before anyone sends a turn to it.
+ *
+ * This list is a ROUTING TABLE. It names every model the gateway would forward to, and a
+ * provider that lists four hundred can be configured with no key at all — so the list is
+ * mostly names that cannot answer. A user picks one, and finds out at 08:00 when a scheduled
+ * job comes back `Missing Authentication header` or `upstream fetch failed`, quoting undici
+ * about a destination they never knowingly chose.
+ *
+ * Local endpoints are the exception that must NOT be marked unconfigured: llama.cpp, Ollama
+ * and LM Studio take no key, and greying them out would hide the one setup that needs
+ * nothing. So this asks only the question it can answer honestly — "is a credential
+ * required here, and is one saved" — and says nothing about whether the server is up.
+ *
+ * Returns `''` when there is nothing to report.
+ */
+const LOCAL_HOST = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|[^/]*\.local)(:|\/|$)/i;
+function unconfiguredReason(d) {
+  if (!d || d.type === 'agent') return '';
+  const base = String(d.baseUrl || '');
+  if (!base) return 'no endpoint URL is set for this provider';
+  if (LOCAL_HOST.test(base)) return '';        // a local server needs no key
+  if (d.apiKey || d.hasKey) return '';
+  return `no API key is saved for ${d.id}`;
+}
+
 export function aggregateModels(cfg) {
   const data = [];
   const seen = new Set();
@@ -93,10 +119,15 @@ export function aggregateModels(cfg) {
     if (!id || seen.has(id)) return;
     seen.add(id);
     const shape = apiShapeOf(d);
+    const blocked = unconfiguredReason(d);
     data.push({
       id,
       object: 'model',
       owned_by: owner,
+      // `configured` is about SETUP, not liveness: false means a turn sent here is known to
+      // fail for a reason the user can fix in Settings. Absent liveness is deliberate — the
+      // gateway does not probe every provider to draw a list.
+      ...(blocked ? { configured: false, reason: blocked } : {}),
       // Additive fields an OpenAI client ignores and a ChatPanel client uses to decide how
       // to call, and to group a picker by provider instead of by a flat list of ids.
       provider: d.id,
@@ -237,10 +268,12 @@ export async function aggregateModelsAsync(cfg, { timeoutMs = 4000 } = {}) {
         if (id && !seen.has(id)) {
           seen.add(id);
           const shape = apiShapeOf(d);
+          const blocked = unconfiguredReason(d);
           base.data.push({
             id, object: 'model', owned_by: d.id, provider: d.id,
             provider_type: d.protocol === 'anthropic' ? 'anthropic' : 'openai',
             api: shape.api, endpoints: shape.endpoints,
+            ...(blocked ? { configured: false, reason: blocked } : {}),
           });
         }
       }
