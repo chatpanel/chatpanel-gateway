@@ -24,6 +24,7 @@ import { redactSegments, segment } from './redact.js';
 import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer, restoreDeep } from './stream.js';
 import { restoreText, gatedDictionary, narrowSpecs, makeToolHarness, placeholderToolNote, assertEndpointUrl } from '@chatpanel/pii';
 import { ensureGatewayToken, isAdminAuthorized } from './gateway-token.js';
+import { resolveBridgeUrl } from './bridge.js';
 import { secureFetch } from './secure-fetch.js';
 import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
 import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
@@ -55,7 +56,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.69';
+export const VERSION = '0.6.70';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -356,13 +357,14 @@ async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, 
   // Full tier for everyone here (the free allowance is enforced in the main
   // handler), but the custom dictionary stays capped for free.
   const redactOpts = { tier: cfg.redaction.tier === 'full' ? 'full' : 'basic', dictionary: gatedDictionary(cfg.redaction, isPro), entities: [] };
-  const s = createRelaySession({ vault, redactOpts, bridgeUrl: cfg.bridge.url, token, harness });
+  const bridgeUrl = await resolveBridgeUrl(cfg);
+  const s = createRelaySession({ vault, redactOpts, bridgeUrl, token, harness });
   const ttl = setTimeout(() => endRelaySession(s.id), 135_000); // bridge tool-call timeout is 120s
   // The placeholder note is already in `system` (injected into the body after
   // redaction in the main handler), so toTurn() carried it here — nothing to add.
   let resp;
   try {
-    resp = await openBridgeChat({ bridgeUrl: cfg.bridge.url, agent, token, messages, system, specs: toolsToSpecs(tools), options: {}, signal: undefined });
+    resp = await openBridgeChat({ bridgeUrl, agent, token, messages, system, specs: toolsToSpecs(tools), options: {}, signal: undefined });
   } catch (e) { clearTimeout(ttl); endRelaySession(s.id); trace?.commit(); return sendJson(res, 502, { error: { message: `bridge: ${e.message}`, type: 'bridge_error' } }); }
   s.reader = resp.body.getReader();
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
@@ -420,7 +422,7 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
   // agent id, which leaves the agent on its own default exactly as before.
   const { agentModel } = parseAgentModel(body?.model, cfg);
   const turn = {
-    bridgeUrl: cfg.bridge.url, agent, token, messages, system, signal: ac.signal,
+    bridgeUrl: await resolveBridgeUrl(cfg), agent, token, messages, system, signal: ac.signal,
     ...(agentModel ? { options: { model: agentModel } } : {}),
   };
 
@@ -1541,7 +1543,7 @@ export function createGateway(cfg = loadConfig()) {
     // modes for one screen; and the direct-to-bridge path is the one with no policy in front
     // of it, so making it necessary for a feature is how it becomes the habit.
     if (req.method === 'GET' && pathname === '/skills') {
-      const base = String(cfg.bridge?.url || '').replace(/\/$/, '');
+      const base = await resolveBridgeUrl(cfg);
       if (!base) return sendJson(res, 503, { error: { message: 'no bridge is configured', type: 'no_bridge' } });
       const token = readBridgeToken(cfg.bridge?.token);
       try {
@@ -1572,7 +1574,7 @@ export function createGateway(cfg = loadConfig()) {
       if (!id || id === '.' || id === '..' || id.includes('/') || id.includes('\\')) {
         return sendJson(res, 400, { error: { message: 'not a skill id', type: 'invalid_request' } });
       }
-      const base = String(cfg.bridge?.url || '').replace(/\/$/, '');
+      const base = await resolveBridgeUrl(cfg);
       if (!base) return sendJson(res, 503, { error: { message: 'no bridge is configured', type: 'no_bridge' } });
       const token = readBridgeToken(cfg.bridge?.token);
       try {

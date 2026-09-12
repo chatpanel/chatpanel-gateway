@@ -94,3 +94,16 @@ test('every default config section is either persisted or deliberately excluded'
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a destination that is this gateway is refused — it is a loop, and its ids shadow the agents', () => {
+  // Arrived from a backup import: the extension keeps the gateway in its own endpoint list,
+  // the desktop copied that list into destinations, and "GemmaSecure → http://127.0.0.1:4320"
+  // listed claude/codex/kiro under its own name. The real agents vanished from the picker.
+  const cfg = { ...structuredClone(DEFAULTS), host: '127.0.0.1', port: 4320, destinations: [] };
+  applyConfigPatch(cfg, { destinations: [
+    { id: 'GemmaSecure', type: 'api', protocol: 'openai', baseUrl: 'http://127.0.0.1:4320', models: ['claude', 'codex'] },
+    { id: 'Local', type: 'api', protocol: 'openai', baseUrl: 'http://localhost:4320/v1', models: ['x'] },
+    { id: 'Ollama', type: 'api', protocol: 'openai', baseUrl: 'http://localhost:11434/v1', models: ['gemma4'] },
+  ] });
+  assert.deepEqual(cfg.destinations.map((d) => d.id), ['Ollama'], 'both spellings of "this gateway" are dropped; a real local provider stays');
+});

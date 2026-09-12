@@ -11,6 +11,8 @@
 // Isolating both keeps the suite hermetic: it can never read or write the real corpus.
 // The temp dir is removed after the run.
 import { spawn } from 'node:child_process';
+// No bridge fallback in tests — see resolveBridgeUrl in src/bridge.js.
+process.env.CHATPANEL_BRIDGE_FALLBACK = process.env.CHATPANEL_BRIDGE_FALLBACK || 'off';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

@@ -17,6 +17,47 @@ import os from 'node:os';
 
 const DEFAULT_TOKEN_PATH = join(os.homedir(), '.chatpanel', 'bridge-token');
 
+export const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:4319';
+const BRIDGE_PROBE_TTL_MS = 10_000;
+let bridgeResolved = { at: 0, cfgUrl: '', url: '', fell: false };
+
+async function bridgeAnswers(url, timeoutMs) {
+  try {
+    const r = await fetch(`${url}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+    return r.ok;
+  } catch { return false; }
+}
+
+/**
+ * Where the bridge is, checked rather than believed.
+ *
+ * The persisted bridge.url was found pointing at an ephemeral port nothing answered on,
+ * while the real bridge sat on 4319: every agent showed unavailable, every agent turn failed,
+ * and the startup line said so in a log nobody was reading. A configured address that does
+ * not answer while the default one does is a stale setting, not a decision, so the default
+ * is used and the fall-back is logged. Probed at most every ten seconds.
+ */
+export async function resolveBridgeUrl(cfg, { fallback, timeoutMs = 1500, now = Date.now() } = {}) {
+  // CHATPANEL_BRIDGE_FALLBACK=off disables the fallback: the test suite sets it, because a
+  // test whose fake bridge has gone away would otherwise find the developer's REAL bridge on
+  // 4319 and send its turns to a live coding agent.
+  if (fallback === undefined) fallback = process.env.CHATPANEL_BRIDGE_FALLBACK === 'off' ? '' : DEFAULT_BRIDGE_URL;
+  const cfgUrl = String(cfg?.bridge?.url || '').replace(/\/$/, '');
+  if (bridgeResolved.url && bridgeResolved.cfgUrl === cfgUrl && now - bridgeResolved.at < BRIDGE_PROBE_TTL_MS) return bridgeResolved.url;
+  let url = cfgUrl || fallback;
+  let fell = false;
+  if (fallback && url !== fallback && !(await bridgeAnswers(url, timeoutMs)) && await bridgeAnswers(fallback, timeoutMs)) {
+    url = fallback;
+    fell = true;
+    if (!bridgeResolved.fell || bridgeResolved.cfgUrl !== cfgUrl) console.log(`[gateway] bridge.url ${cfgUrl} is not answering; the bridge on ${fallback} is — using it (fix the address in Settings to silence this)`);
+  }
+  bridgeResolved = { at: now, cfgUrl, url, fell };
+  return url;
+}
+
+/** Test seam. */
+export function resetBridgeResolution() { bridgeResolved = { at: 0, cfgUrl: '', url: '', fell: false }; }
+
 export function readBridgeToken(cfgToken, tokenPath = DEFAULT_TOKEN_PATH) {
   if (cfgToken) return cfgToken;
   try {

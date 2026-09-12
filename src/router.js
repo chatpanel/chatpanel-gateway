@@ -12,7 +12,7 @@
 //   }
 
 import { secureFetch } from './secure-fetch.js';
-import { readBridgeToken } from './bridge.js';
+import { readBridgeToken, resolveBridgeUrl } from './bridge.js';
 //
 // /v1/models aggregates every destination's models so clients can discover them.
 
@@ -29,10 +29,15 @@ const KNOWN_AGENTS = ['codex', 'claude', 'opencode', 'pi', 'kiro', 'antigravity'
 export function listDestinations(cfg) {
   const configured = (Array.isArray(cfg.destinations) ? cfg.destinations : []).filter(Boolean);
   const haveId = new Set(configured.map((d) => d.id));
-  const out = [...configured];
-  for (const a of KNOWN_AGENTS) {
-    if (!haveId.has(a)) out.push({ id: a, type: 'agent', agent: a, models: [a] });
-  }
+  // AGENTS FIRST. The model list de-duplicates by id in this order, and resolveDestination
+  // takes the first destination that serves a model — so an API destination that happened to
+  // list "codex" or "claude" (a gateway pointed at itself did exactly that) used to swallow
+  // the agents: they vanished from the picker and a turn for one was proxied to the loop.
+  const out = [
+    ...configured.filter((d) => d.type === 'agent'),
+    ...KNOWN_AGENTS.filter((a) => !haveId.has(a)).map((a) => ({ id: a, type: 'agent', agent: a, models: [a] })),
+    ...configured.filter((d) => d.type !== 'agent'),
+  ];
   if (cfg.backend === 'api' && !configured.some((d) => d.type === 'api')) {
     out.push({ id: 'openai', type: 'api', protocol: 'openai', baseUrl: cfg.upstreams?.openai?.baseUrl, models: [] });
     out.push({ id: 'anthropic', type: 'api', protocol: 'anthropic', baseUrl: cfg.upstreams?.anthropic?.baseUrl, models: [] });
@@ -156,7 +161,7 @@ export function aggregateModels(cfg) {
  * spends a subprocess per agent to describe something unusable.
  */
 async function bridgeAgentModels(cfg, installed, timeoutMs) {
-  const base = String(cfg?.bridge?.url || '').replace(/\/$/, '');
+  const base = await resolveBridgeUrl(cfg);
   if (!base || !installed) return new Map();
   const token = readBridgeToken(cfg.bridge?.token);
   const ids = [...installed.entries()].filter(([, ok]) => ok).map(([id]) => id);
@@ -183,7 +188,7 @@ async function bridgeAgentModels(cfg, installed, timeoutMs) {
 
 /** id → installed, from the bridge's own /health. `null` when it could not be asked. */
 async function bridgeAgentAvailability(cfg, timeoutMs) {
-  const base = String(cfg?.bridge?.url || '').replace(/\/$/, '');
+  const base = await resolveBridgeUrl(cfg);
   if (!base) return null;
   try {
     const token = readBridgeToken(cfg.bridge?.token);

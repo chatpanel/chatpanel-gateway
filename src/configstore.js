@@ -83,6 +83,21 @@ export function applyNerModelSelection(cfg, id) {
 }
 
 // Merge an editable patch into the live cfg. Only known fields; ignores the rest.
+/**
+ * Is this API destination the gateway itself? A loop: a turn routed there comes straight
+ * back in. It arrived once from a backup import — the extension keeps the gateway in its own
+ * endpoint list, and the desktop copied that list into the gateway's destinations — and its
+ * model ids (the agents') then shadowed the real agents. Refused at the door, with a log line.
+ */
+export function isSelfDestination(d, cfg = {}) {
+  if (!d || d.type !== 'api') return false;
+  let u;
+  try { u = new URL(String(d.baseUrl || '')); } catch { return false; }
+  const loop = /^(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)$/i.test(u.hostname);
+  const port = Number(u.port) || (u.protocol === 'https:' ? 443 : 80);
+  return loop && port === (Number(cfg.port) || 4320);
+}
+
 export function applyConfigPatch(cfg, patch = {}) {
   if (patch.backend === 'bridge' || patch.backend === 'api') cfg.backend = patch.backend;
   if (Array.isArray(patch.destinations)) {
@@ -91,6 +106,7 @@ export function applyConfigPatch(cfg, patch = {}) {
     const prev = new Map((Array.isArray(cfg.destinations) ? cfg.destinations : []).map((d) => [d.id, d]));
     cfg.destinations = patch.destinations
       .filter((d) => d && typeof d.id === 'string' && (d.type === 'agent' || d.type === 'api'))
+      .filter((d) => { const self = isSelfDestination(d, cfg); if (self) console.log(`[gateway] refusing destination "${d.id}": ${d.baseUrl} is this gateway — a loop`); return !self; })
       .map((d) => {
         const out = { id: d.id, type: d.type, models: Array.isArray(d.models) ? d.models.filter((m) => typeof m === 'string' && m) : [] };
         if (d.type === 'agent') out.agent = d.agent || d.id;
