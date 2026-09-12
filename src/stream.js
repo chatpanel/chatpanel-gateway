@@ -17,23 +17,30 @@ import { restoreText, restoreWithAliases } from '@chatpanel/pii';
 // Returns a TransformStream-free chunk transformer: feed it decoded string chunks,
 // it returns the prefix that's safe to forward now and buffers a possibly-partial
 // trailing token. Call flush() at end-of-stream.
+/**
+ * Split `buf` into what is safe to forward now and what may still be the start of a token.
+ *
+ * Two shapes are held back: an unterminated "[[" (a token mid-way), and a trailing SINGLE
+ * "[" — a model tokenizes "[[ORG_1]]" as "[" + "[ORG_1]]" often enough that forwarding the
+ * lone bracket left every restored name wearing one: "[NVIDIA designs GPUs". "[[" cannot
+ * legitimately appear except as a token open, and a lone "[" at a chunk edge costs nothing to
+ * wait one chunk for.
+ */
+function splitSafe(buf) {
+  const open = buf.lastIndexOf('[[');
+  if (open !== -1 && !buf.slice(open).includes(']]')) return [buf.slice(0, open), buf.slice(open)];
+  if (buf.endsWith('[')) return [buf.slice(0, -1), '['];
+  return [buf, ''];
+}
+
 export function makeTokenRestorer(vault) {
   let buf = '';
   return {
     push(chunk) {
       if (!vault) return chunk || '';
       buf += chunk || '';
-      // If an unterminated "[[" sits in the tail, a token may still be forming —
-      // hold from there. "[[" can't legitimately appear except as a token open.
-      const open = buf.lastIndexOf('[[');
       let safe;
-      if (open !== -1 && !buf.slice(open).includes(']]')) {
-        safe = buf.slice(0, open);
-        buf = buf.slice(open);
-      } else {
-        safe = buf;
-        buf = '';
-      }
+      [safe, buf] = splitSafe(buf);
       return restoreText(safe, vault);
     },
     flush() {
@@ -83,10 +90,8 @@ function makeFieldRestorer(vault, restoreFn) {
   return {
     push(chunk) {
       buf += chunk || '';
-      const open = buf.lastIndexOf('[[');
       let safe;
-      if (open !== -1 && !buf.slice(open).includes(']]')) { safe = buf.slice(0, open); buf = buf.slice(open); }
-      else { safe = buf; buf = ''; }
+      [safe, buf] = splitSafe(buf);
       return restoreFn(safe, vault);
     },
     flush() { const out = restoreFn(buf, vault); buf = ''; return out; },

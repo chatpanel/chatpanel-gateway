@@ -137,3 +137,21 @@ test('the in-process detector reports nothing — it never leaves the machine', 
   await redactSegments(segs, { tier: 'full', dictionary: [] }, { onEgress: (e) => seen.push(e) });
   assert.deepEqual(seen, []);
 });
+
+test('a placeholder split as "[" + "[ORG_1]]" across chunks restores without a stray bracket', async () => {
+  // Seen live: the model tokenized "[[ORG_1]]" as "[" then "[ORG_1]]", the restorer forwarded
+  // the lone "[" as safe text, and every restored name arrived as "[NVIDIA".
+  const body = { messages: [{ role: 'user', content: 'write about NVIDIA GPUs' }] };
+  const segs = openai.collectSegments(body, {});
+  const { vault, count } = await redactSegments(segs, { tier: 'basic', dictionary: [{ value: 'NVIDIA', type: 'ORG' }] });
+  assert.ok(count >= 1, 'the dictionary entry was redacted');
+  const token = body.messages[0].content.match(/\[\[[A-Z]+_\d+\]\]/)?.[0];
+  assert.ok(token, 'a reversible token was produced');
+  const r = makeTokenRestorer(vault);
+  const out = r.push('\n\n[') + r.push(token.slice(1) + ' designs') + r.push(' GPUs') + r.flush();
+  assert.equal(out, '\n\nNVIDIA designs GPUs');
+  // and a lone "[" that was NOT a token still comes through, one chunk late
+  const r2 = makeTokenRestorer(vault);
+  assert.equal(r2.push('see [') + r2.push('link](x)') + r2.flush(), 'see [link](x)');
+  assert.equal(r2.push('ends with [') + r2.flush(), 'ends with [');
+});

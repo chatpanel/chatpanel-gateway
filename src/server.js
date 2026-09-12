@@ -55,7 +55,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.68';
+export const VERSION = '0.6.69';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -170,7 +170,7 @@ function mkTrace(sink) {
       const entry = /** @type {any} */ ({ ...this.meta, timings });
       setImmediate(() => {
         sink(entry);
-        console.log(`[gateway] model=${entry.model || '-'} → ${entry.dest ? `${entry.dest}(${entry.type})` : 'none'} · redacted ${entry.redacted || 0}${entry.sanitized ? ` · scrubbed ${entry.sanitized} hidden` : ''}${entry.narrowed ? ` · narrowed -${entry.narrowed}` : ''} · ${fmtTimings(timings)}`);
+        console.log(`[gateway] model=${entry.model || '-'} → ${entry.dest ? `${entry.dest}(${entry.type})` : 'none'} · ${entry.redaction === 'off' ? 'redaction OFF (client request)' : `redacted ${entry.redacted || 0}`}${entry.sanitized ? ` · scrubbed ${entry.sanitized} hidden` : ''}${entry.narrowed ? ` · narrowed -${entry.narrowed}` : ''} · ${fmtTimings(timings)}`);
       });
     },
   };
@@ -1624,6 +1624,7 @@ export function createGateway(cfg = loadConfig()) {
     let redactedCount = 0;
     let sanitizedCount = 0;
     let narrowedTools = 0;
+    let redactionOff = false;
     let isPro = true;
     // Off the hot path: only build a trace when logging is on, so it adds nothing
     // when off (no clock reads, no record, no console line).
@@ -1659,14 +1660,24 @@ export function createGateway(cfg = loadConfig()) {
             type: 'free_limit_reached',
           } });
         }
-        const segs = r.adapter.collectSegments(body, cfg.redaction);
+        // REDACTION OFF, FOR THIS REQUEST, BECAUSE THE USER SAID SO. A note task that reads
+        // "write about NVIDIA GPUs" had NVIDIA replaced with an organisation placeholder, and
+        // the model — seeing only [[ORG_1]] — guessed a different company and wrote about
+        // that. The policy is right for the corpus and wrong for the user's own instruction,
+        // and only the user can tell which a given turn is. So an AUTHENTICATED local client
+        // (the desktop, the extension — both hold the gateway token) may send
+        // `X-ChatPanel-Redaction: off`; the trace records it so the ledger says "redaction
+        // was off for this turn" rather than "0 redactions", which would read as "nothing to
+        // redact". Anonymous callers cannot switch it off: that is what the token is for.
+        redactionOff = String(req.headers['x-chatpanel-redaction'] || '').trim().toLowerCase() === 'off' && isAdminAuthorized(req);
+        const segs = redactionOff ? [] : r.adapter.collectSegments(body, cfg.redaction);
         const ac = new AbortController();
         req.on('close', () => ac.abort());
         const rd0 = trace ? trace.clock() : 0;
         // Redact at the configured tier for everyone (free users get name/org
         // redaction within their allowance); the custom dictionary stays capped for
         // free (isPro decides that inside).
-        const { vault: v, count, sanitized } = await redactSegments(segs, cfg.redaction, {
+        const { vault: v, count, sanitized } = redactionOff ? { vault: null, count: 0, sanitized: 0 } : await redactSegments(segs, cfg.redaction, {
           signal: ac.signal,
           isPro,
           // A detector is the only hop that sees the request BEFORE redaction. It is guarded
@@ -1695,7 +1706,7 @@ export function createGateway(cfg = loadConfig()) {
         // tools (so privacy-aware models USE them instead of refusing). Injected
         // AFTER redaction so the note isn't itself redacted. Covers BOTH the API
         // forward and the relay (which reads system from this same body).
-        if (Array.isArray(body.tools) && body.tools.length && typeof r.adapter.injectSystemNote === 'function') {
+        if (!redactionOff && Array.isArray(body.tools) && body.tools.length && typeof r.adapter.injectSystemNote === 'function') {
           r.adapter.injectSystemNote(body, placeholderToolNote({ toolData: cfg.tools?.toolData }));
         }
         outBody = Buffer.from(JSON.stringify(body), 'utf8');
@@ -1749,7 +1760,7 @@ export function createGateway(cfg = loadConfig()) {
       });
     }
     if (trace) {
-      trace.meta = { t: Date.now(), model: body?.model || null, dest: dest ? dest.id : null, type: dest ? dest.type : null, redacted: redactedCount, sanitized: sanitizedCount, narrowed: narrowedTools, detail: redactionDetail(vault, cfg.logDetail) };
+      trace.meta = { t: Date.now(), model: body?.model || null, dest: dest ? dest.id : null, type: dest ? dest.type : null, redacted: redactedCount, sanitized: sanitizedCount, narrowed: narrowedTools, detail: redactionDetail(vault, cfg.logDetail), redaction: redactionOff ? 'off' : (cfg.redaction.tier || 'basic') };
     }
     if (dest && dest.type === 'api') {
       if (!dest.baseUrl) { trace?.commit(); return sendJson(res, 502, { error: `destination "${dest.id}" has no baseUrl` }); }
