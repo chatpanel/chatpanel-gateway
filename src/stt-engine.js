@@ -422,6 +422,18 @@ async function decodeSession(s, { flush = false } = {}) {
   const tooLong = audio.length >= MAX_SEGMENT_S * SAMPLE_RATE;
   const overflow = audio.length >= MAX_BUFFER_S * SAMPLE_RATE;
   if (flush || trailingQuiet || tooLong || overflow) {
+    // WHY THIS SEGMENT WAS COMMITTED — and it is not always because the speaker finished.
+    //
+    // Four situations produced an identical `final`, and a client could not tell them apart:
+    // the session ending and a trailing pause are the end of a TURN; the length and buffer
+    // caps are this engine cutting a segment it cannot hold any longer, mid-sentence, while
+    // the speaker is still going. In dictation the difference does not matter — either way
+    // the text is appended. In a voice CONVERSATION every final is SENT, so a long sentence
+    // was cut at twelve seconds and half of it asked as a question:
+    //   "…you should just continuously listen to it and then" → sent, answered, lost.
+    // Both fields are ADDITIVE: an older client ignores them and behaves exactly as before.
+    const reason = flush ? 'flush' : trailingQuiet ? 'silence' : overflow ? 'overflow' : 'length';
+    const endOfTurn = reason === 'flush' || reason === 'silence';
     // Commit: the open segment becomes a final; the buffer restarts empty.
     s.chunks = []; s.samples = 0; s.lastInterim = '';
     // Diarize this committed segment (opt-in): embed its audio, cluster → speaker.
@@ -433,7 +445,7 @@ async function decodeSession(s, { flush = false } = {}) {
         speaker = s.diarizer.assign(vec, { pinnedLabel: s.speakerLabel });
       } catch { /* diarization is additive — a failure never drops the transcript */ }
     }
-    emit(s, speaker ? { type: 'final', text, speaker } : { type: 'final', text });
+    emit(s, { type: 'final', text, reason, endOfTurn, ...(speaker ? { speaker } : {}) });
   } else if (text !== s.lastInterim) {
     s.lastInterim = text;
     emit(s, { type: 'interim', text });

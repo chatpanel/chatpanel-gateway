@@ -199,3 +199,36 @@ test('endSilenceMs is per-session, clamped, and defaults to the dictation value'
   assert.equal(stt.clampEndSilence(undefined), 700, 'absent means the dictation default');
   assert.equal(stt.clampEndSilence('nonsense'), 700, 'and so does garbage');
 });
+
+// WHY A SEGMENT WAS COMMITTED, and why a client needs to know.
+//
+// A trailing pause and a segment too long to hold produced an identical `final`. In dictation
+// that is harmless — the text is appended either way. In a voice conversation every final is
+// SENT, so a sentence longer than the segment cap was cut in half and the first half asked as
+// a question. Additive fields: an older client ignores them and behaves exactly as before.
+test('a final says whether the speaker finished or the engine merely had to cut the segment', async () => {
+  sttEngine._setPipeForTest(async () => ({ text: 'still going' }));
+  const gw = createGateway(cfg());
+  const port = await listen(gw);
+  const base = `http://127.0.0.1:${port}`;
+  const { id } = await (await fetch(`${base}/stt/sessions`, { method: 'POST', body: '{}' })).json();
+
+  const sse = collectSse(`${base}/stt/sessions/${id}/events`, (evs) => evs.some((e) => e.type === 'end'), 12_000);
+  // Unbroken speech past the segment cap: the engine must commit, and must NOT call it a turn.
+  await fetch(`${base}/stt/sessions/${id}/audio`, { method: 'POST', body: pcm(13) });
+  await new Promise((r) => setTimeout(r, 700));
+  // Then speech followed by a pause: that one IS the end of a turn.
+  await fetch(`${base}/stt/sessions/${id}/audio`, { method: 'POST', body: pcm(1, 1) });
+  await new Promise((r) => setTimeout(r, 700));
+  await fetch(`${base}/stt/sessions/${id}`, { method: 'DELETE' });
+
+  const finals = (await sse).filter((e) => e.type === 'final');
+  assert.ok(finals.length >= 2, `expected a cut and a turn, got ${JSON.stringify(finals)}`);
+  const cut = finals.find((f) => f.reason === 'length' || f.reason === 'overflow');
+  assert.ok(cut, `a segment past the cap must say why it was committed: ${JSON.stringify(finals)}`);
+  assert.equal(cut.endOfTurn, false, 'the speaker had not finished — sending this asks half a sentence');
+  const turn = finals.find((f) => f.endOfTurn === true);
+  assert.ok(turn, 'and a pause (or the flush on close) ends a turn');
+  assert.ok(['silence', 'flush'].includes(turn.reason));
+  gw.close();
+});
