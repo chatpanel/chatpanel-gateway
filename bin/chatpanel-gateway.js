@@ -3,6 +3,9 @@
 //
 //   chatpanel-gateway              start the gateway (foreground)
 //   chatpanel-gateway mcp          stdio MCP server exposing warm history as tools
+//   chatpanel-gateway tools list   the same tools, from a shell — names and one-liners
+//   chatpanel-gateway tools schema <tool>   one tool's full schema
+//   chatpanel-gateway call <tool> '<json>'  run one tool (exit 0 ok · 1 tool error · 2 usage)
 //   chatpanel-gateway local        show the local runtime — bridge + gateway, one view
 //   chatpanel-gateway connect      point your CLI agents (Codex, Claude Code, …) at this server
 //   chatpanel-gateway --install    register login auto-start + start now
@@ -21,6 +24,11 @@ try {
     // server.js (which would open a second handle on the warm SQLite store).
     const { runMcpServer } = await import('../src/mcp.js');
     await runMcpServer();
+  } else if (arg === 'tools' || arg === 'call') {
+    // MCP2CLI: the MCP tools as shell verbs, for agents that only have a shell. Same
+    // in-process dispatcher as `mcp`, same no-server.js rule.
+    const { runMcpCli } = await import('../src/mcp-cli.js');
+    process.exit(await runMcpCli(process.argv.slice(2)));
   } else if (arg === 'local') {
     // Read-only unified view of both services. No server.js import — just HTTP probes.
     const { localStatus, formatLocalStatus } = await import('../src/local-status.js');
@@ -52,7 +60,7 @@ try {
         start();
         break;
       default:
-        console.error(`unknown option: ${arg}\nUsage: chatpanel-gateway [mcp|--install|--uninstall|--status|--version]`);
+        console.error(`unknown option: ${arg}\nUsage: chatpanel-gateway [mcp|tools list|tools schema <tool>|call <tool> '<json>'|local|connect|--install|--uninstall|--status|--version]`);
         process.exit(2);
     }
   }
