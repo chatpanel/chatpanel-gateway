@@ -56,7 +56,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.75';
+export const VERSION = '0.6.76';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -1808,7 +1808,16 @@ export function createGateway(cfg = loadConfig()) {
         // AFTER redaction so the note isn't itself redacted. Covers BOTH the API
         // forward and the relay (which reads system from this same body).
         if (!redactionOff && Array.isArray(body.tools) && body.tools.length && typeof r.adapter.injectSystemNote === 'function') {
-          r.adapter.injectSystemNote(body, placeholderToolNote({ toolData: cfg.tools?.toolData }));
+          // A relayed CLI agent brings tools of its own that run PAST this proxy and get the
+          // placeholder literally; an API model has only the tools in this request. The note
+          // has to say which is which, so the destination is looked up here — the same
+          // resolution as below, on the same hint, just earlier. No destination means the
+          // legacy bridge path, which is an agent.
+          const early = resolveDestination(body?.model, cfg, r.kind, {
+            destination: String(req.headers['x-chatpanel-destination'] || body?.chatpanel?.destination || '').trim(),
+          });
+          const ownTools = !(early && early.type === 'api');
+          r.adapter.injectSystemNote(body, placeholderToolNote({ toolData: cfg.tools?.toolData, ownTools }));
         }
         outBody = Buffer.from(JSON.stringify(body), 'utf8');
       }
