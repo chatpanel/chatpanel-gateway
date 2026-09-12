@@ -58,12 +58,74 @@ export async function resolveBridgeUrl(cfg, { fallback, timeoutMs = 1500, now = 
 /** Test seam. */
 export function resetBridgeResolution() { bridgeResolved = { at: 0, cfgUrl: '', url: '', fell: false }; }
 
-export function readBridgeToken(cfgToken, tokenPath = DEFAULT_TOKEN_PATH) {
-  if (cfgToken) return cfgToken;
+// Once the bridge has REJECTED the configured token while the file held a different one,
+// the file is what every later call presents. Set by `bridgeTokenRejected`, below.
+let preferFileToken = false;
+
+function fileToken(tokenPath) {
   try {
     if (existsSync(tokenPath)) return readFileSync(tokenPath, 'utf8').trim();
   } catch { /* ignore */ }
   return '';
+}
+
+/**
+ * The bridge token: the config's value first, the file otherwise — until the bridge says
+ * the config's value is wrong.
+ *
+ * `bridge.token` in gateway.config.json is a COPY: the extension's Gateway tab writes its
+ * own setting there, and a bridge that regenerates its token leaves the copy behind. The
+ * desktop then relayed every Codex turn with the stale copy and got 403 from a bridge ten
+ * milliseconds away — an empty streaming bubble, forever. The file is written by the
+ * bridge itself, so when the configured token is rejected and the file differs, the file
+ * is tried once and, if it works, kept. Nothing is second-guessed before the bridge has
+ * actually said no: a pinned token on a loopback bridge stays a pinned token.
+ */
+export function readBridgeToken(cfgToken, tokenPath = DEFAULT_TOKEN_PATH) {
+  const file = fileToken(tokenPath);
+  if (!cfgToken) return file;
+  if (preferFileToken && file && file !== cfgToken) return file;
+  return cfgToken;
+}
+
+/**
+ * Called with the token the bridge just refused. Returns the file's token when it is a
+ * different one worth trying — and from then on `readBridgeToken` prefers it — or '' when
+ * there is nothing else to try.
+ */
+export function bridgeTokenRejected(rejected, tokenPath = DEFAULT_TOKEN_PATH) {
+  const file = fileToken(tokenPath);
+  if (!file || file === rejected) return '';
+  if (!preferFileToken) {
+    preferFileToken = true;
+    console.warn('[gateway] the bridge rejected bridge.token from gateway.config.json; using ~/.chatpanel/bridge-token (the bridge wrote it). Clear the config value to silence this.');
+  }
+  return file;
+}
+
+/** Test seam. */
+export function resetBridgeTokenPreference() { preferFileToken = false; }
+
+const isAuthFailure = (status) => status === 401 || status === 403;
+
+// One POST to /chat, retried once with the file's token when the bridge refuses the one
+// it was given — the stale-copy case above.
+async function postChat(bridgeUrl, token, body, signal, tokenPath) {
+  const send = (t) => fetch(`${bridgeUrl.replace(/\/$/, '')}/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(t ? { authorization: `Bearer ${t}` } : {}) },
+    body,
+    signal,
+  });
+  // A caller hands over the token it resolved; once a rejection has flipped the
+  // preference, the file's token goes first here too.
+  const first = readBridgeToken(token, tokenPath);
+  let res = await send(first);
+  if (isAuthFailure(res.status)) {
+    const alt = bridgeTokenRejected(first, tokenPath);
+    if (alt) { await res.text().catch(() => {}); res = await send(alt); }
+  }
+  return res;
 }
 
 // Flatten an OpenAI/Anthropic message's content (string | parts[]) to plain text
@@ -88,19 +150,14 @@ export function toBridgeMessages(messages) {
 
 // Open a bridge /chat stream WITH tool specs (pageTools), returning the raw fetch
 // Response so the tool-relay can hold the reader open across the OpenAI round-trip.
-export async function openBridgeChat({ bridgeUrl, agent, token, messages, system, specs, options, signal }) {
-  const res = await fetch(`${bridgeUrl.replace(/\/$/, '')}/chat`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
-    body: JSON.stringify({
-      agent,
-      messages: toBridgeMessages(messages),
-      system: system || '',
-      options: options || {},
-      ...(Array.isArray(specs) && specs.length ? { pageTools: { specs } } : {}),
-    }),
-    signal,
-  });
+export async function openBridgeChat({ bridgeUrl, agent, token, messages, system, specs, options, signal, tokenPath }) {
+  const res = await postChat(bridgeUrl, token, JSON.stringify({
+    agent,
+    messages: toBridgeMessages(messages),
+    system: system || '',
+    options: options || {},
+    ...(Array.isArray(specs) && specs.length ? { pageTools: { specs } } : {}),
+  }), signal, tokenPath);
   if (!res.ok || !res.body) {
     const detail = await res.text().catch(() => '');
     throw new Error(`bridge /chat HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`);
@@ -112,21 +169,13 @@ export async function openBridgeChat({ bridgeUrl, agent, token, messages, system
 // onActivity(event) for everything else the agent reports — status lines, the working
 // directory, tool calls, reasoning.
 // of model text and returns the full (un-restored) text. Throws on bridge error.
-export async function streamBridgeChat({ bridgeUrl, agent, token, messages, system, options, signal }, onText, onActivity = null) {
-  const res = await fetch(`${bridgeUrl.replace(/\/$/, '')}/chat`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify({
-      agent,
-      messages: toBridgeMessages(messages),
-      system: system || '',
-      options: options || {},
-    }),
-    signal,
-  });
+export async function streamBridgeChat({ bridgeUrl, agent, token, messages, system, options, signal, tokenPath }, onText, onActivity = null) {
+  const res = await postChat(bridgeUrl, token, JSON.stringify({
+    agent,
+    messages: toBridgeMessages(messages),
+    system: system || '',
+    options: options || {},
+  }), signal, tokenPath);
 
   if (!res.ok || !res.body) {
     const detail = await res.text().catch(() => '');
