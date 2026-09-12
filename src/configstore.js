@@ -46,7 +46,7 @@ export function publicConfig(cfg, { proUnlocked = false } = {}) {
     backend: cfg.backend,
     // Strip per-destination apiKey (write-only).
     destinations: (Array.isArray(cfg.destinations) ? cfg.destinations : []).map((d) => { const { apiKey, ...rest } = d; return { ...rest, hasKey: !!apiKey }; }),
-    bridge: { url: cfg.bridge?.url, agent: cfg.bridge?.agent, hasToken: !!cfg.bridge?.token },
+    bridge: { url: cfg.bridge?.url, agent: cfg.bridge?.agent, hasToken: !!cfg.bridge?.token, permissionMode: cfg.bridge?.permissionMode || 'default', workingDir: cfg.bridge?.workingDir || '' },
     upstreams: cfg.upstreams,
     redaction: {
       tier: cfg.redaction?.tier,
@@ -98,6 +98,18 @@ export function isSelfDestination(d, cfg = {}) {
   return loop && port === (Number(cfg.port) || 4320);
 }
 
+export const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions'];
+
+/** The per-turn options a gateway-driven agent receives — the bridge's own vocabulary. */
+export function bridgeAgentOptions(cfg, extra = {}) {
+  const b = cfg?.bridge || {};
+  return {
+    ...(PERMISSION_MODES.includes(b.permissionMode) && b.permissionMode !== 'default' ? { permissionMode: b.permissionMode } : {}),
+    ...(typeof b.workingDir === 'string' && b.workingDir.trim() ? { workingDir: b.workingDir.trim() } : {}),
+    ...extra,
+  };
+}
+
 export function applyConfigPatch(cfg, patch = {}) {
   if (patch.backend === 'bridge' || patch.backend === 'api') cfg.backend = patch.backend;
   if (Array.isArray(patch.destinations)) {
@@ -122,6 +134,8 @@ export function applyConfigPatch(cfg, patch = {}) {
   if (patch.bridge && typeof patch.bridge === 'object') {
     if (typeof patch.bridge.url === 'string') cfg.bridge.url = patch.bridge.url;
     if (typeof patch.bridge.agent === 'string') cfg.bridge.agent = patch.bridge.agent;
+    if (PERMISSION_MODES.includes(patch.bridge.permissionMode)) cfg.bridge.permissionMode = patch.bridge.permissionMode;
+    if (typeof patch.bridge.workingDir === 'string') cfg.bridge.workingDir = patch.bridge.workingDir.trim().slice(0, 1024);
   }
   // api backend: where redacted traffic is forwarded (the client still picks the
   // model + sends its own key).

@@ -112,3 +112,64 @@ test('bridge backend /v1/models lists the agents', async () => {
   assert.ok(json.data.some((m) => m.id === 'codex'));
   gw.close(); br.close();
 });
+
+test('the client aborting mid-stream severs the bridge request — Stop must reach the agent', async () => {
+  // A bridge that streams forever, and notices when the gateway hangs up on it.
+  let gone = false;
+  let started = false;
+  const s = createServer((req, res) => {
+    started = true;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const t = setInterval(() => res.write(`data: ${JSON.stringify({ type: 'delta', text: 'word ' })}\n\n`), 50);
+    t.unref?.(); // so a gateway that never hangs up makes this FAIL rather than hang the runner
+    const onGone = () => { gone = true; clearInterval(t); try { res.end(); } catch { /* closed */ } };
+    res.on('close', onGone);
+  });
+  const brPort = await listen(s);
+  const gw = createGateway(bridgeCfg(`http://127.0.0.1:${brPort}`));
+  const port = await listen(gw);
+  const ac = new AbortController();
+  const r = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ stream: true, model: 'codex', messages: [{ role: 'user', content: 'go on forever' }] }),
+    signal: ac.signal,
+  });
+  const reader = r.body.getReader();
+  await reader.read(); // the gateway's own head chunk — the bridge may not have the request yet
+  for (let i = 0; i < 40 && !started; i += 1) await new Promise((res) => setTimeout(res, 50));
+  assert.equal(started, true, 'the bridge received the turn');
+  assert.equal(gone, false, 'the bridge stream is alive while the client reads');
+  ac.abort();
+  await reader.read().catch(() => {});
+  for (let i = 0; i < 40 && !gone; i += 1) await new Promise((res) => setTimeout(res, 50));
+  assert.equal(gone, true, 'the gateway hung up on the bridge within two seconds of the client aborting');
+  gw.closeAllConnections?.(); gw.close(); s.closeAllConnections?.(); s.close();
+});
+
+test('the configured permission mode and working directory reach the bridge as turn options', async () => {
+  const br = await fakeBridge();
+  const cfg = bridgeCfg(`http://127.0.0.1:${br.port}`);
+  cfg.bridge.permissionMode = 'acceptEdits';
+  cfg.bridge.workingDir = '/tmp/work';
+  const gw = createGateway(cfg);
+  const port = await listen(gw);
+  await (await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'codex', messages: [{ role: 'user', content: 'mail alex@example.com' }] }),
+  })).json();
+  const sent = JSON.parse(br.body);
+  assert.deepEqual(sent.options, { permissionMode: 'acceptEdits', workingDir: '/tmp/work' });
+  gw.close(); br.close();
+});
+
+test('the default permission mode sends no option at all — the bridge keeps its own default', async () => {
+  const { bridgeAgentOptions, applyConfigPatch } = await import('../src/configstore.js');
+  const cfg = { bridge: { permissionMode: 'default', workingDir: '' } };
+  assert.deepEqual(bridgeAgentOptions(cfg), {});
+  assert.deepEqual(bridgeAgentOptions(cfg, { model: 'opus' }), { model: 'opus' });
+  applyConfigPatch(cfg, { bridge: { permissionMode: 'nope', workingDir: '  /w  ' } });
+  assert.equal(cfg.bridge.permissionMode, 'default', 'an unknown mode is refused');
+  assert.equal(cfg.bridge.workingDir, '/w');
+  applyConfigPatch(cfg, { bridge: { permissionMode: 'bypassPermissions' } });
+  assert.deepEqual(bridgeAgentOptions(cfg), { permissionMode: 'bypassPermissions', workingDir: '/w' });
+});

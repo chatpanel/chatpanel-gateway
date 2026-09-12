@@ -57,6 +57,14 @@ export const DEFAULTS = {
     // Bearer token for the bridge's privileged /chat route. Empty = read the
     // per-install token from ~/.chatpanel/bridge-token.
     token: '',
+    // What a CLI agent driven THROUGH the gateway may do — the same three modes the
+    // extension offers per agent: 'default' (read-only, asks before writing),
+    // 'acceptEdits' (edits files in its workspace on its own), 'bypassPermissions' (full
+    // access and shell). Absent, the bridge ran every gateway turn read-only and told the
+    // model to "set Permissions" in a settings page the desktop did not have.
+    permissionMode: 'default',
+    // Where the agent works. Empty = the bridge's ChatPanel workspace.
+    workingDir: '',
   },
 
   upstreams: {

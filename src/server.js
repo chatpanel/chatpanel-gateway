@@ -47,7 +47,7 @@ import { rawOrtAvailable } from './ort.js';
 import * as ttsVoices from './tts-voices.js';
 import { resolveTtsVoice } from './tts-voice-resolve.js';
 import { resolvePro, checkQuota, consume, usage } from './freegate.js';
-import { publicConfig, applyConfigPatch, applyNerModelSelection, persistConfig, configPath } from './configstore.js';
+import { publicConfig, applyConfigPatch, applyNerModelSelection, persistConfig, configPath, bridgeAgentOptions } from './configstore.js';
 import { resolveDestination, aggregateModelsAsync, listDestinations } from './router.js';
 import { makeAccessEvent } from './observability.js';
 import { createPersistentAccessLog } from './access-log-store.js';
@@ -56,7 +56,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.74';
+export const VERSION = '0.6.75';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -401,7 +401,7 @@ async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, 
   // redaction in the main handler), so toTurn() carried it here — nothing to add.
   let resp;
   try {
-    resp = await openBridgeChat({ bridgeUrl, agent, token, messages, system, specs: toolsToSpecs(tools), options: {}, signal: undefined });
+    resp = await openBridgeChat({ bridgeUrl, agent, token, messages, system, specs: toolsToSpecs(tools), options: bridgeAgentOptions(cfg), signal: undefined });
   } catch (e) { clearTimeout(ttl); endRelaySession(s.id); trace?.commit(); return sendJson(res, 502, { error: { message: `bridge: ${e.message}`, type: 'bridge_error' } }); }
   s.reader = resp.body.getReader();
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
@@ -453,14 +453,23 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
   const shaper = shaperFor(kind, body?.model || agent);
   const token = readBridgeToken(cfg.bridge.token);
   const ac = new AbortController();
-  req.on('close', () => ac.abort());
+  // STOP MUST REACH THE AGENT. The client pressing Stop aborts ITS request; the bridge only
+  // kills the CLI when the gateway's request to it goes away, and that happened only if the
+  // gateway noticed. It listened on `req 'close'`, which on this Node fires when the REQUEST
+  // is complete — the body was read long ago — not when the socket is cut mid-response. So
+  // Stop in the desktop stopped nothing: Codex wrote its whole essay to nobody (measured:
+  // the process outlived the abort by the length of the answer). The RESPONSE closing is
+  // the signal for a severed connection; a response that finished normally is not a stop.
+  res.on('close', () => { if (!res.writableFinished) ac.abort(); });
 
   // The model half of `claude/opus`, handed to the CLI as its `--model`. Absent for a bare
   // agent id, which leaves the agent on its own default exactly as before.
   const { agentModel } = parseAgentModel(body?.model, cfg);
   const turn = {
     bridgeUrl: await resolveBridgeUrl(cfg), agent, token, messages, system, signal: ac.signal,
-    ...(agentModel ? { options: { model: agentModel } } : {}),
+    // Permissions and working directory from the gateway's config (the desktop's Settings →
+    // Engine → Agents), plus the model half of `claude/opus` when the caller named one.
+    options: bridgeAgentOptions(cfg, agentModel ? { model: agentModel } : {}),
   };
 
   if (!wantStream) {
@@ -1764,7 +1773,7 @@ export function createGateway(cfg = loadConfig()) {
         if (!redactionOff) await ensureNer(cfg);
         const segs = redactionOff ? [] : r.adapter.collectSegments(body, cfg.redaction);
         const ac = new AbortController();
-        req.on('close', () => ac.abort());
+        res.on('close', () => { if (!res.writableFinished) ac.abort(); });
         const rd0 = trace ? trace.clock() : 0;
         // Redact at the configured tier for everyone (free users get name/org
         // redaction within their allowance); the custom dictionary stays capped for
