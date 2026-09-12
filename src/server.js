@@ -33,6 +33,7 @@ import { startNer, ensureNer } from './ner.js';
 import { installTimestampedConsole } from './log.js';
 import { saveBackupSecret, clearBackupSecret, loadBackupSecret, hasBackupSecret } from './history-store.js';
 import { createMemoryStore } from './memory-store.js';
+import { createPrefsStore } from './prefs-store.js';
 import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackups } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
@@ -56,7 +57,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.76';
+export const VERSION = '0.6.77';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -64,6 +65,7 @@ export const VERSION = '0.6.76';
 // See docs/architecture-data-tiers.
 const historyStore = await createHistoryStore();
 const memoryStore = await createMemoryStore();
+const prefsStore = createPrefsStore();
 
 // OBSERVABILITY — a ring of "which agent read what, when", persisted across restarts (the
 // gateway updates often; an empty panel after each restart reads as "nothing is set up").
@@ -128,7 +130,7 @@ function originAllowed(origin, cfg) {
 
 function setCors(res, origin) {
   res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-ChatPanel-Token');
   res.setHeader('Vary', 'Origin');
 }
@@ -693,6 +695,12 @@ export function createGateway(cfg = loadConfig()) {
       && req.method === 'POST' && !isAdminAuthorized(req)) {
       return sendJson(res, 403, { error: { message: 'memory write — extension origin or gateway token required', type: 'forbidden' } });
     }
+    // Client preferences travel between the extension and the desktop through here, and an
+    // MCP server entry can carry an Authorization header — so READS are gated too, unlike
+    // history and memory. A drive-by page must not learn what tools the user connected.
+    if (pathname === '/v1/prefs' && !isAdminAuthorized(req)) {
+      return sendJson(res, 403, { error: { message: 'prefs: extension origin or gateway token required', type: 'forbidden' } });
+    }
     // The access log is who-read-what — sensitive, and writable only by the local MCP
     // process (which sends the gateway token). Extension Origin or token for both the
     // read (dashboard) and the report (MCP child); a drive-by page has neither.
@@ -764,6 +772,29 @@ export function createGateway(cfg = loadConfig()) {
         return sendJson(res, 400, { error: { message: `ingest failed: ${e.message}`, type: 'ingest_error' } });
       }
     }
+    // --- CLIENT PREFERENCES — the settings every client shares (prefs-store.js).
+    //   GET  /v1/prefs[?section=id][&stamps=1] → { ok, revision, sections: { id: { value, updatedAt, by } } }
+    //   POST /v1/prefs { sections: { id: { value, updatedAt } }, by } → { ok, revision, applied, kept, sections }
+    //   DELETE /v1/prefs?section=id → { ok, removed }
+    if (pathname === '/v1/prefs' && req.method === 'GET') {
+      const section = String(url.searchParams.get('section') || '');
+      if (url.searchParams.get('stamps')) return sendJson(res, 200, { ok: true, revision: prefsStore.revision, stamps: prefsStore.stamps() });
+      return sendJson(res, 200, { ok: true, revision: prefsStore.revision, sections: prefsStore.get(section) });
+    }
+    if (pathname === '/v1/prefs' && (req.method === 'POST' || req.method === 'PUT')) {
+      try {
+        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+        const out = prefsStore.put(body.sections || {}, { by: body.by || '' });
+        return sendJson(res, 200, { ok: true, ...out });
+      } catch (e) {
+        return sendJson(res, 400, { error: { message: `prefs write failed: ${e.message}`, type: 'prefs_error' } });
+      }
+    }
+    if (pathname === '/v1/prefs' && req.method === 'DELETE') {
+      const section = String(url.searchParams.get('section') || '');
+      return sendJson(res, 200, { ok: true, removed: section ? prefsStore.remove(section) : false });
+    }
+
     // --- MEMORY. Small, durable facts about the user, reachable by every local agent.
     //   GET  /v1/memory/list                      → { memories }
     //   POST /v1/memory/recall  { text, scopes }  → { memories, block }

@@ -35,6 +35,8 @@ const child = spawn(process.execPath, ['--test', ...files], {
     CHATPANEL_HISTORY_KEY: join(dir, 'history-key'),
     CHATPANEL_HISTORY_SECRET: join(dir, 'history-secret.enc'),
     CHATPANEL_ACCESS_LOG: join(dir, 'access-log.json'),
+    CHATPANEL_MEMORY_STORE: join(dir, 'memory-store.enc'),
+    CHATPANEL_PREFS_STORE: join(dir, 'prefs-store.enc'),
     //   3. MODELS — every chat turn now asks ensureNer to start the bundled detector when
     //      its weights are on disk (0.6.72). On a developer's machine that IS the real
     //      ~/.chatpanel/models, so a suite written for deterministic-only redaction loaded
