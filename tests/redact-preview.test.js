@@ -6,7 +6,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { createGateway } from '../src/server.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// HERMETIC BY CONSTRUCTION. /redact now starts the bundled detector on demand when its
+// weights are on disk, so on a developer's own machine these tests would quietly pick up
+// whatever model that person happens to have installed — and "patterns only" would pass or
+// fail depending on the box. An empty model dir means no engine can start here, which is
+// the state this file is about. Set before the server module loads.
+process.env.CHATPANEL_MODELS_DIR = mkdtempSync(join(tmpdir(), 'cp-no-models-'));
+
+const { createGateway } = await import('../src/server.js');
 
 function listen(server) {
   return new Promise((res) => server.listen(0, '127.0.0.1', () => res(server.address().port)));
@@ -98,4 +109,41 @@ test('THE PREVIEW IS WHAT IS SENT — same text, same string on the wire', async
     });
     assert.equal(seen, body.text);
   } finally { gw.close(); up.close(); }
+});
+
+// WHAT THE PREVIEW COULD NOT SEE. Patterns run with no detector at all, so a preview taken
+// while the detector is down is visually indistinguishable from a clean one — same shield,
+// same tokens for the email, the name left standing. `detector.coverage` is the only thing
+// that tells them apart, so a client can say "patterns only" instead of implying names.
+test('the preview reports its own coverage — patterns only, when no detector is running', async () => {
+  const gw = createGateway(cfg());
+  const port = await listen(gw);
+  try {
+    const { body } = await preview(port, 'mail alex@example.com about the demo');
+    assert.equal(body.detector.coverage, 'patterns');
+    assert.equal(body.detector.ready, false);
+    assert.equal(body.detector.source, 'bundled');
+  } finally { gw.close(); }
+});
+
+test('a configured external detector is reported as the source — its own turn is the test', async () => {
+  const c = cfg();
+  c.redaction.detection = { backend: 'endpoint', url: 'http://127.0.0.1:9/ner' };
+  c.redaction.tier = 'full';
+  const gw = createGateway(c);
+  const port = await listen(gw);
+  try {
+    const { body } = await preview(port, 'mail alex@example.com');
+    assert.equal(body.detector.source, 'external');
+    assert.equal(body.detector.coverage, 'names');
+  } finally { gw.close(); }
+});
+
+test('an empty draft still answers with the detector block — the strip renders before you type', async () => {
+  const gw = createGateway(cfg());
+  const port = await listen(gw);
+  try {
+    const { body } = await preview(port, '');
+    assert.equal(body.detector.coverage, 'patterns');
+  } finally { gw.close(); }
 });

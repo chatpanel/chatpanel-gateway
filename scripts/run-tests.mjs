@@ -35,6 +35,14 @@ const child = spawn(process.execPath, ['--test', ...files], {
     CHATPANEL_HISTORY_KEY: join(dir, 'history-key'),
     CHATPANEL_HISTORY_SECRET: join(dir, 'history-secret.enc'),
     CHATPANEL_ACCESS_LOG: join(dir, 'access-log.json'),
+    //   3. MODELS — every chat turn now asks ensureNer to start the bundled detector when
+    //      its weights are on disk (0.6.72). On a developer's machine that IS the real
+    //      ~/.chatpanel/models, so a suite written for deterministic-only redaction loaded
+    //      a 400 MB NER model mid-test, flipped the tier to 'full', and the loaded ONNX
+    //      runtime kept the event loop alive for 30 minutes after the last assertion.
+    //      An empty models dir means nothing can start; tests that want a model set
+    //      their own dir (pocket-tts, parakeet) and still win — they assign after this.
+    CHATPANEL_MODELS_DIR: join(dir, 'models'),
   },
 });
 child.on('close', (code) => {

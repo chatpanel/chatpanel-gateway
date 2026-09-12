@@ -29,7 +29,7 @@ import { secureFetch } from './secure-fetch.js';
 import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
 import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
 import { shaperFor } from './shape.js';
-import { startNer } from './ner.js';
+import { startNer, ensureNer } from './ner.js';
 import { installTimestampedConsole } from './log.js';
 import { saveBackupSecret, clearBackupSecret, loadBackupSecret, hasBackupSecret } from './history-store.js';
 import { createMemoryStore } from './memory-store.js';
@@ -56,7 +56,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.71';
+export const VERSION = '0.6.72';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -279,6 +279,43 @@ function nerBaseUrl(cfg) {
   const url = cfg.redaction?.detection?.url;
   if (!url || cfg.redaction?.detection?.backend === 'off') return null;
   return url;
+}
+
+/**
+ * CAN THIS GATEWAY REDACT NAMES RIGHT NOW — the question every privacy UI has to answer
+ * before it draws a shield.
+ *
+ * Deterministic patterns (emails, phones, cards, keys) always run, so a redaction with no
+ * detector behind it produces text that LOOKS redacted. `coverage` names the difference:
+ * 'names' means people, organisations and places are covered too; 'patterns' means they are
+ * not, and the client is expected to say so rather than let the shield imply it.
+ *
+ * Synchronous on purpose — it reports the engine's own state and never probes the network,
+ * so it can sit on a per-keystroke route.
+ */
+function detectorStatus(cfg) {
+  const det = cfg?.redaction?.detection;
+  const tier = cfg?.redaction?.tier === 'full' ? 'full' : 'basic';
+  if (det && det.backend && det.backend !== 'off') {
+    // A user's own detector: we cannot know it is up without sending it text, and a probe
+    // per keystroke is not a trade worth making. Report it as configured and let the turn
+    // itself be the test.
+    return { source: 'external', backend: det.backend, state: 'external', model: det.model || null, ready: true, tier, coverage: tier === 'full' ? 'names' : 'patterns' };
+  }
+  const h = nerEngine.health();
+  const ready = h.ok && tier === 'full';
+  return {
+    source: 'bundled',
+    state: h.state,                 // 'off' | 'loading' | 'downloading' | 'ready' | 'error'
+    model: h.model || cfg?.ner?.model || null,
+    // Weights on disk with the engine off is the recoverable case (it starts on the next
+    // request); no weights is the case that needs the user to install a model.
+    installed: nerEngine.modelOnDisk(cfg?.ner?.model || undefined),
+    error: h.error || null,
+    ready,
+    tier,
+    coverage: ready ? 'names' : 'patterns',
+  };
 }
 
 // Health of the detector for /status. The bundled IN-PROCESS engine takes
@@ -690,6 +727,9 @@ export function createGateway(cfg = loadConfig()) {
           model: health.model,         // e.g. "en_core_web_sm"
           url: health.url,
         },
+        // Additive: one block that answers "are names covered right now", for clients that
+        // draw a privacy indicator and must not overstate it. See detectorStatus.
+        detector: detectorStatus(cfg),
         pro: { unlocked: proUnlocked }, usage: usage(cfg),
         uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
       });
@@ -928,8 +968,30 @@ export function createGateway(cfg = loadConfig()) {
         return sendJson(res, health.ok ? 200 : 503, health);
       }
       if (req.method === 'POST') {
+        // A POST here IS the request to detect, so start the bundled engine if it is not
+        // running and its weights are already on disk (see ensureNer — it never downloads).
+        // Without this a config with `ner.autostart:false` answered 503 until a restart,
+        // and the client read that as "redaction is broken" while the model sat unused.
+        await ensureNer(cfg);
         // In-process engine path.
         if (nerEngine.state() !== 'off') {
+          // NOT READY IS NOT AN ANSWER. `detect()` returns [] when the pipeline is still
+          // loading or failed to load, and 200 {entities:[]} is indistinguishable from
+          // "this text contains no names" — the one lie a privacy layer must never tell.
+          // Say which state it is in instead, and let the caller show "starting…".
+          if (!nerEngine.isReady()) {
+            const h = nerEngine.health();
+            return sendJson(res, 503, {
+              error: {
+                message: h.state === 'error'
+                  ? `NER model failed to load: ${h.error || 'unknown error'}`
+                  : `NER model is ${h.state} — not ready yet`,
+                type: h.state === 'error' ? 'ner_error' : 'ner_loading',
+              },
+              state: h.state,
+              model: h.model,
+            });
+          }
           try {
             const body = await readBody(req, cfg.maxBodyBytes);
             let text = '';
@@ -942,7 +1004,22 @@ export function createGateway(cfg = loadConfig()) {
         }
         // External detector proxy (user-configured endpoint).
         const url = nerBaseUrl(cfg);
-        if (!url) return sendJson(res, 503, { error: { message: 'NER not configured — deterministic-only redaction', type: 'ner_off' } });
+        if (!url) {
+          // The bundled engine is the intended detector here and it is not running. Say
+          // WHY — "not configured" sent a user hunting through settings that were already
+          // correct, when the real answer was that the model was never downloaded.
+          const onDisk = nerEngine.modelOnDisk(cfg.ner?.model || undefined);
+          return sendJson(res, 503, {
+            error: {
+              message: onDisk
+                ? 'the bundled detector could not start — deterministic-only redaction'
+                : 'no entity detector is installed — deterministic-only redaction (install one from Gateway settings)',
+              type: onDisk ? 'ner_error' : 'ner_not_installed',
+            },
+            state: nerEngine.state(),
+            model: cfg.ner?.model || null,
+          });
+        }
         try {
           const body = await readBody(req, cfg.maxBodyBytes);
           // secureFetch: scheme/host policy + resolved-IP check before POSTing raw text to the detector.
@@ -973,10 +1050,13 @@ export function createGateway(cfg = loadConfig()) {
       let text = '';
       try { text = String(JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8'))?.text || ''); }
       catch { text = ''; }
-      if (!text) return sendJson(res, 200, { text: '', count: 0, sanitized: 0, entities: [] });
+      if (!text) return sendJson(res, 200, { text: '', count: 0, sanitized: 0, entities: [], detector: detectorStatus(cfg) });
       try {
         let out = text;
         const isPro = await resolvePro(cfg.pro?.entitlementToken);
+        // Same start-on-demand as a real turn, for the same reason — and so the preview
+        // keeps describing the request rather than a weaker version of it.
+        await ensureNer(cfg);
         const r = await redactSegments(
           [segment(() => out, (v) => { out = v; })],
           cfg.redaction,
@@ -988,6 +1068,11 @@ export function createGateway(cfg = loadConfig()) {
           sanitized: r.sanitized || 0,
           tier: cfg.redaction?.tier === 'full' ? 'full' : 'basic',
           entities: redactionDetail(r.vault, 'types') || [],
+          // WHAT THIS PREVIEW COULD NOT SEE — additive, and the whole reason a client can be
+          // honest. Patterns catch emails, phones and card numbers with no detector at all,
+          // so a preview with the detector down looks identical to a clean one: same text,
+          // same shield, names intact. `coverage` is the difference, said out loud.
+          detector: detectorStatus(cfg),
         });
       } catch (e) {
         // Fail LOUD. A preview that silently returns the original text would tell the user
@@ -1672,6 +1757,11 @@ export function createGateway(cfg = loadConfig()) {
         // was off for this turn" rather than "0 redactions", which would read as "nothing to
         // redact". Anonymous callers cannot switch it off: that is what the token is for.
         redactionOff = String(req.headers['x-chatpanel-redaction'] || '').trim().toLowerCase() === 'off' && isAdminAuthorized(req);
+        // The detector must be up BEFORE the text is redacted, not after someone notices it
+        // wasn't. redactSegments consults the engine and falls open when it is not ready, so
+        // a gateway whose engine never autostarted sent names through at full tier without a
+        // word. Cheap after the first call: ready → a state check, absent weights → nothing.
+        if (!redactionOff) await ensureNer(cfg);
         const segs = redactionOff ? [] : r.adapter.collectSegments(body, cfg.redaction);
         const ac = new AbortController();
         req.on('close', () => ac.abort());
