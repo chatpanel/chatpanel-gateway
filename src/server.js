@@ -55,7 +55,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.67';
+export const VERSION = '0.6.68';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -660,6 +660,10 @@ export function createGateway(cfg = loadConfig()) {
       const tts = ttsEngine.health();
       return sendJson(res, 200, {
         ok: true, version: VERSION, backend: cfg.backend, tier: cfg.redaction.tier,
+        // WHO STARTED THIS PROCESS — additive. ChatPanel Desktop sets CHATPANEL_MANAGED_BY=desktop
+        // on the login service it registers, so a client can say "provided by the desktop app"
+        // and stop offering install.sh for a gateway that is already installed. Absent otherwise.
+        ...(process.env.CHATPANEL_MANAGED_BY ? { managedBy: String(process.env.CHATPANEL_MANAGED_BY).slice(0, 32) } : {}),
         // `runtime` = 'native' (npm, fast quantized) | 'wasm' (binary, slow fp32) —
         // the extension uses it to advise the far-faster native gateway.
         stt: { enabled: cfg.stt?.enabled !== false, state: stt.state, ready: stt.ok, model: stt.model || cfg.stt?.model || DEFAULT_STT_MODEL, runtime: stt.runtime, dtype: stt.dtype },
@@ -676,6 +680,7 @@ export function createGateway(cfg = loadConfig()) {
       const health = await probeNerHealth(cfg); // live GET /health on the detector
       return sendJson(res, 200, {
         ok: true, version: VERSION, backend: cfg.backend, tier: cfg.redaction.tier,
+        ...(process.env.CHATPANEL_MANAGED_BY ? { managedBy: String(process.env.CHATPANEL_MANAGED_BY).slice(0, 32) } : {}), // see /health
         ner: {
           autostart: !!cfg.ner?.autostart,
           configured: health.configured,
