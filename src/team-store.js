@@ -20,6 +20,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from '
 import { join, dirname } from 'node:path';
 import os from 'node:os';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { foldBoard, emptyBoardState } from './team-board.js';
 
 const DIR = join(os.homedir(), '.chatpanel');
 const STORE_PATH = process.env.CHATPANEL_TEAMS_STORE || join(DIR, 'team-runs.enc');
@@ -79,8 +80,18 @@ export function applyEvent(run, ev) {
       run.status = p.status || 'completed'; run.usage = p.usage || run.usage; run.proposal = p.proposal ?? run.proposal; run.endedAt = ev.at;
       break;
     case 'run.stop-requested': run.stopRequested = ev.at; break;
+    // The board as a message board (events 0.81): threads, posts, replies, decisions, asks.
+    // Folded by the shared fold, so this record and both clients agree on it.
+    case 'board.thread': case 'board.post': case 'board.decision': case 'board.thread-status':
+      run.threads = foldBoard(run.threads || emptyBoardState(), ev);
+      if (type === 'board.thread-status' && p.status !== 'waiting' && run.status === 'waiting' && !(run.threads.threads || []).some((t) => t.kind === 'ask' && t.status === 'waiting')) run.status = 'answered';
+      break;
+    case 'task.waiting': { const t = run.tasks.find((x) => x.id === p.taskId); if (t) { t.status = 'waiting'; t.waitingOn = p.threadId; } break; }
+    case 'run.waiting': run.status = 'running'; break;
+    case 'run.resumed': run.status = 'running'; run.endedAt = null; run.checkpoint = null; break;
     default: break;
   }
+  if (type === 'run.done' && p.checkpoint) run.checkpoint = p.checkpoint;
   return run;
 }
 
@@ -112,7 +123,7 @@ export class TeamStore {
     renameSync(tmp, this.path);
   }
   _fresh(id, { client = '' } = {}) {
-    return { id, client: String(client || '').slice(0, 40), createdAt: this.now(), lastEventAt: this.now(), status: 'planning', team: '', request: '', roles: [], plan: null, tasks: [], board: [], proposal: null, usage: null, stopRequested: null, events: [] };
+    return { id, client: String(client || '').slice(0, 40), createdAt: this.now(), lastEventAt: this.now(), status: 'planning', team: '', request: '', roles: [], plan: null, tasks: [], board: [], threads: emptyBoardState(), checkpoint: null, proposal: null, usage: null, stopRequested: null, events: [] };
   }
   _evict() {
     if (this.runs.size <= MAX_RUNS) return;
@@ -165,9 +176,43 @@ export class TeamStore {
       .filter((r) => !team || r.team === team)
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, Math.max(1, Math.min(200, Number(limit) || 50)))
-      .map((r) => { const v = this._view(r); return { ...v, board: undefined, tasks: v.tasks.map((t) => ({ ...t, text: undefined })), findings: r.board.length }; });
+      .map((r) => { const v = this._view(r); return { ...v, board: undefined, threads: undefined, checkpoint: undefined, tasks: v.tasks.map((t) => ({ ...t, text: undefined })), findings: r.board.length, waiting: (r.threads?.threads || []).filter((t) => t.kind === 'ask' && t.status === 'waiting').length }; });
   }
   /** Ask the running client to stop. Recorded as an event, so watchers (the runner) see it. */
+  /**
+   * A person's answer to an ask, from ANY client: an answer post and the thread resolved,
+   * appended as the events the running client's tail turns into the member's answer.
+   * The post id is fixed here so the runner's own echo of it lands once.
+   */
+  answer(id, { threadId, text, by = 'person' } = {}) {
+    const run = this.runs.get(String(id || ''));
+    if (!run) throw new Error(`no run ${id}`);
+    const thread = (run.threads?.threads || []).find((t) => t.id === threadId);
+    if (!thread) throw new Error(`no thread ${threadId}`);
+    if (thread.kind !== 'ask') throw new Error(`thread ${threadId} is not an ask`);
+    const at = this.now();
+    const postId = `ans_${randomBytes(4).toString('hex')}`;
+    const post = { id: postId, threadId, by: String(by || 'person').slice(0, 40), kind: 'answer', text: String(text || '').slice(0, 4000), refs: [], replyTo: null, status: 'open', at };
+    return this.append(id, [{ type: 'board.post', at, post }, { type: 'board.thread-status', at, threadId, status: 'resolved', answeredAt: at }]);
+  }
+  /** A person's decision on a post (approve / reject the draft, a finding), from any client. */
+  decide(id, { postId, status, by = 'person' } = {}) {
+    const run = this.runs.get(String(id || ''));
+    if (!run) throw new Error(`no run ${id}`);
+    if (!['approved', 'rejected', 'proposed', 'open'].includes(status)) throw new Error('status must be approved, rejected, proposed or open');
+    if (!(run.threads?.posts || []).some((x) => x.id === postId)) throw new Error(`no post ${postId}`);
+    const at = this.now();
+    return this.append(id, [{ type: 'board.decision', at, postId, status, by: String(by || 'person').slice(0, 40) }]);
+  }
+  /** A person's own post in a thread (a note, a question), from any client. */
+  post(id, { threadId, text, by = 'person', kind = 'note', replyTo = null } = {}) {
+    const run = this.runs.get(String(id || ''));
+    if (!run) throw new Error(`no run ${id}`);
+    if (!(run.threads?.threads || []).some((t) => t.id === threadId)) throw new Error(`no thread ${threadId}`);
+    const at = this.now();
+    const post = { id: `pp_${randomBytes(4).toString('hex')}`, threadId, by: String(by || 'person').slice(0, 40), kind: ['note', 'question', 'decision'].includes(kind) ? kind : 'note', text: String(text || '').slice(0, 4000), refs: [], replyTo: replyTo || null, status: 'open', at };
+    return this.append(id, [{ type: 'board.post', at, post }]);
+  }
   stop(id) {
     const run = this.runs.get(String(id || ''));
     if (!run) return null;

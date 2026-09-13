@@ -123,6 +123,54 @@ test('the routes: create, append, read, tail live over SSE, stop from another cl
   await fetch(`${base}/v1/teams/runs/${id}`, { method: 'DELETE', headers: H });
 });
 
+test('the board: threads and posts fold on the record; a person answers an ask from another client and the runner\'s tail sees it; decisions land', async () => {
+  const { base } = await gateway();
+  const id = `run_board_${Date.now().toString(36)}`;
+  await (await fetch(`${base}/v1/teams/runs`, { method: 'POST', headers: H, body: JSON.stringify({ id, team: 'travel', request: 'trip', client: 'desktop' }) })).json();
+  const tail = sse(await fetch(`${base}/v1/teams/runs/${id}/events`, { headers: H }));
+  await tail.until(1);
+  // The running client's runner opens a task thread, a member posts a finding, then asks.
+  await (await fetch(`${base}/v1/teams/runs/${id}/events`, { method: 'POST', headers: H, body: JSON.stringify({ events: [
+    { type: 'run.started', at: 1, team: 'travel' }, { type: 'plan.ready', at: 2, tasks: [{ id: 't1', role: 'researcher' }] },
+    { type: 'board.thread', at: 2, thread: { id: 'th1', kind: 'task', taskId: 't1', title: 'Find facts', by: 'runner', status: 'open', at: 2, posts: 0 } },
+    { type: 'board.post', at: 3, post: { id: 'p1', threadId: 'th1', by: 'researcher', kind: 'finding', text: 'Rooms $260', refs: [], replyTo: null, status: 'open', at: 3, finding: { kind: 'claim' } } },
+    { type: 'board.thread', at: 4, thread: { id: 'ask1', kind: 'ask', taskId: 't1', title: 'Which week?', by: 'researcher', status: 'waiting', at: 4, posts: 0, ask: { type: 'info', options: ['Feb 13–17'] } } },
+    { type: 'board.post', at: 4, post: { id: 'q1', threadId: 'ask1', by: 'researcher', kind: 'question', text: 'Which week?', refs: [], replyTo: null, status: 'open', at: 4 } },
+    { type: 'task.waiting', at: 4, taskId: 't1', role: 'researcher', threadId: 'ask1', text: 'Which week?' },
+  ] }) })).json();
+  const rec = await (await fetch(`${base}/v1/teams/runs/${id}`, { headers: H })).json();
+  assert.equal(rec.run.threads.threads.length, 2);
+  assert.equal(rec.run.threads.posts.length, 2);
+  assert.equal(rec.run.tasks[0].status, 'waiting');
+  const list = await (await fetch(`${base}/v1/teams/runs?limit=5`, { headers: H })).json();
+  assert.equal(list.runs.find((r) => r.id === id).waiting, 1, 'the list says an ask is waiting');
+  // The OTHER client answers.
+  const bad = await fetch(`${base}/v1/teams/runs/${id}/answer`, { method: 'POST', headers: H, body: JSON.stringify({ threadId: 'th1', text: 'x' }) });
+  assert.equal(bad.status, 400, 'only an ask thread takes an answer');
+  const ans = await (await fetch(`${base}/v1/teams/runs/${id}/answer`, { method: 'POST', headers: H, body: JSON.stringify({ threadId: 'ask1', text: 'Feb 13–17', by: 'person' }) })).json();
+  assert.equal(ans.ok, true, JSON.stringify(ans));
+  const askThread = ans.run.threads.threads.find((t) => t.id === 'ask1');
+  assert.equal(askThread.status, 'resolved');
+  const answerPost = ans.run.threads.posts.find((x) => x.kind === 'answer');
+  assert.equal(answerPost.text, 'Feb 13–17');
+  // The runner, tailing its own run, receives the answer post and the thread's status.
+  await tail.until(9);
+  const types = tail.got.map((e) => e.type);
+  assert.ok(types.includes('board.post') && types.at(-1) === 'board.thread-status', types.join(' '));
+  assert.equal(tail.got.find((e) => e.type === 'board.post' && e.payload.post.kind === 'answer').payload.post.id, answerPost.id);
+  // The runner's own echo of the same answer lands once.
+  await (await fetch(`${base}/v1/teams/runs/${id}/events`, { method: 'POST', headers: H, body: JSON.stringify({ events: [{ type: 'board.post', at: 6, post: answerPost }] }) })).json();
+  const again = await (await fetch(`${base}/v1/teams/runs/${id}`, { headers: H })).json();
+  assert.equal(again.run.threads.posts.filter((x) => x.kind === 'answer').length, 1);
+  // A decision on the finding, from either client.
+  const dec = await (await fetch(`${base}/v1/teams/runs/${id}/decide`, { method: 'POST', headers: H, body: JSON.stringify({ postId: 'p1', status: 'approved' }) })).json();
+  assert.equal(dec.run.threads.posts.find((x) => x.id === 'p1').status, 'approved');
+  const note = await (await fetch(`${base}/v1/teams/runs/${id}/post`, { method: 'POST', headers: H, body: JSON.stringify({ threadId: 'th1', text: 'use $160', replyTo: 'p1' }) })).json();
+  assert.equal(note.run.threads.posts.at(-1).replyTo, 'p1');
+  await tail.close();
+  await fetch(`${base}/v1/teams/runs/${id}`, { method: 'DELETE', headers: H });
+});
+
 test('prefs changes are pushed to a live subscriber', async () => {
   const { base } = await gateway();
   const sub = sse(await fetch(`${base}/v1/prefs/events`, { headers: H }));

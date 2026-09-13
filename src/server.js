@@ -58,7 +58,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.80';
+export const VERSION = '0.6.81';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -824,6 +824,9 @@ export function createGateway(cfg = loadConfig()) {
     //   GET  /v1/teams/runs/:id[?events=1]   → { ok, run }             the board, the tasks, the proposal
     //   POST /v1/teams/runs/:id/events { events: [...] } → { ok, run } the running client appends
     //   GET  /v1/teams/runs/:id/events[?after=seq] (SSE)              replay from `after`, then live
+    //   POST /v1/teams/runs/:id/answer { threadId, text, by }  → { ok, run }  a person answers an ask (0.6.81)
+    //   POST /v1/teams/runs/:id/decide { postId, status, by }  → { ok, run }  approve / reject a post
+    //   POST /v1/teams/runs/:id/post { threadId, text, kind?, replyTo?, by } → { ok, run }
     //   POST /v1/teams/runs/:id/stop         → { ok, run }             a stop request any client may make
     //   DELETE /v1/teams/runs/:id            → { ok, removed }
     if (pathname === '/v1/teams/runs' && req.method === 'GET') {
@@ -838,7 +841,7 @@ export function createGateway(cfg = loadConfig()) {
       }
     }
     {
-      const m = /^\/v1\/teams\/runs\/([a-zA-Z0-9_-]{4,64})(\/events|\/stop)?$/.exec(pathname);
+      const m = /^\/v1\/teams\/runs\/([a-zA-Z0-9_-]{4,64})(\/events|\/stop|\/answer|\/decide|\/post)?$/.exec(pathname);
       if (m) {
         const id = m[1];
         const sub = m[2] || '';
@@ -850,6 +853,20 @@ export function createGateway(cfg = loadConfig()) {
         if (sub === '/stop' && req.method === 'POST') {
           const run = teamStore.stop(id);
           return run ? sendJson(res, 200, { ok: true, run }) : sendJson(res, 404, { error: { message: `no run ${id}`, type: 'not_found' } });
+        }
+        // The board, from a person on ANY client (0.6.81): answer an ask, decide on a post,
+        // post a note. Each is appended as events, so the running client's tail sees it.
+        if ((sub === '/answer' || sub === '/decide' || sub === '/post') && req.method === 'POST') {
+          try {
+            const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+            const by = String(body.by || 'person').slice(0, 40);
+            const run = sub === '/answer' ? teamStore.answer(id, { threadId: body.threadId, text: body.text, by })
+              : sub === '/decide' ? teamStore.decide(id, { postId: body.postId, status: body.status, by })
+                : teamStore.post(id, { threadId: body.threadId, text: body.text, by, kind: body.kind, replyTo: body.replyTo });
+            return sendJson(res, 200, { ok: true, run });
+          } catch (e) {
+            return sendJson(res, e.message.startsWith('no ') ? 404 : 400, { error: { message: `team run: ${e.message}`, type: 'team_error' } });
+          }
         }
         if (sub === '/events' && req.method === 'POST') {
           try {
