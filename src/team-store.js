@@ -34,7 +34,7 @@ export const STALE_AFTER_MS = 5 * 60_000;
 const RUN_ID_RE = /^[a-zA-Z0-9_-]{4,64}$/;
 const LIVE = new Set(LIVE_RUN_STATUSES);
 
-function loadOrCreateKey() {
+export function loadOrCreateKey() {
   try { if (existsSync(KEY_PATH)) return Buffer.from(readFileSync(KEY_PATH, 'utf8').trim(), 'base64'); } catch { /* regenerate */ }
   const key = randomBytes(32);
   mkdirSync(dirname(KEY_PATH), { recursive: true, mode: 0o700 });
@@ -58,7 +58,8 @@ const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)
 export function applyEvent(run, ev) { return foldRun(run, ev); }
 
 export class TeamStore {
-  constructor({ storePath = STORE_PATH, now = () => Date.now(), staleAfterMs = STALE_AFTER_MS } = {}) {
+  constructor({ storePath = STORE_PATH, now = () => Date.now(), staleAfterMs = STALE_AFTER_MS, scorecards = null } = {}) {
+    this.scorecards = scorecards; // the agents' ledgers (scorecard-store.js), fed by task.scored
     this.path = storePath;
     this.now = now;
     this.staleAfterMs = staleAfterMs;
@@ -131,6 +132,8 @@ export class TeamStore {
       const ev = { seq: seq++, type: String(type), at: Number(at) || this.now(), payload };
       run.events.push(ev);
       applyEvent(run, ev);
+      // A finished task's fact goes to the member's scorecard — chained and attested there.
+      if (this.scorecards && ev.type === 'task.scored') this.scorecards.fromRunEvent(ev, run);
       for (const fn of this.watchers.get(run.id) || []) { try { fn(ev); } catch { /* a dead watcher */ } }
     }
     this.save();

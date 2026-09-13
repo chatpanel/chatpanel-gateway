@@ -34,7 +34,8 @@ import { installTimestampedConsole } from './log.js';
 import { saveBackupSecret, clearBackupSecret, loadBackupSecret, hasBackupSecret } from './history-store.js';
 import { createMemoryStore } from './memory-store.js';
 import { createPrefsStore } from './prefs-store.js';
-import { createTeamStore } from './team-store.js';
+import { createTeamStore, loadOrCreateKey as loadTeamKey } from './team-store.js';
+import { createScorecardStore } from './scorecard-store.js';
 import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackups } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
@@ -58,7 +59,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.86';
+export const VERSION = '0.6.87';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -67,7 +68,8 @@ export const VERSION = '0.6.86';
 const historyStore = await createHistoryStore();
 const memoryStore = await createMemoryStore();
 const prefsStore = createPrefsStore();
-const teamStore = createTeamStore();
+const scorecards = createScorecardStore({ key: loadTeamKey() });
+const teamStore = createTeamStore({ scorecards });
 // Who is watching prefs change — a client with a live subscription is told the moment a
 // section is written by the other client, instead of waiting for its next focus.
 const prefsWatchers = new Set();
@@ -706,7 +708,7 @@ export function createGateway(cfg = loadConfig()) {
     // Client preferences travel between the extension and the desktop through here, and an
     // MCP server entry can carry an Authorization header — so READS are gated too, unlike
     // history and memory. A drive-by page must not learn what tools the user connected.
-    if ((pathname === '/v1/prefs' || pathname.startsWith('/v1/prefs/') || pathname.startsWith('/v1/teams')) && !isAdminAuthorized(req)) {
+    if ((pathname === '/v1/prefs' || pathname.startsWith('/v1/prefs/') || pathname.startsWith('/v1/teams') || pathname.startsWith('/v1/agents')) && !isAdminAuthorized(req)) {
       return sendJson(res, 403, { error: { message: 'prefs: extension origin or gateway token required', type: 'forbidden' } });
     }
     // The access log is who-read-what — sensitive, and writable only by the local MCP
@@ -820,6 +822,23 @@ export function createGateway(cfg = loadConfig()) {
       return undefined;
     }
 
+    // --- SCORECARDS. Every agent's attested record (scorecard-store.js): the chain, its card,
+    //     whether it verifies; a person's rating appended from either client.
+    if (pathname === '/v1/agents/scorecards' && req.method === 'GET') return sendJson(res, 200, { ok: true, agents: scorecards.list() });
+    {
+      const m = /^\/v1\/agents\/([a-zA-Z0-9_.:@+-]{1,120})\/scorecard$/.exec(pathname);
+      if (m) {
+        const agentId = decodeURIComponent(m[1]);
+        if (req.method === 'GET') return sendJson(res, 200, { ok: true, ...(await scorecards.get(agentId)) });
+        if (req.method === 'POST') {
+          try {
+            const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+            const entry = await scorecards.append({ agentId, kind: 'rating', runId: body.runId, taskId: body.taskId, jobId: body.jobId, rating: { by: String(body.by || 'person').slice(0, 40), score: body.score, note: body.note, about: body.about }, refs: body.refs });
+            return sendJson(res, 200, { ok: true, entry });
+          } catch (e) { return sendJson(res, 400, { error: { message: `scorecard: ${e.message}`, type: 'scorecard_error' } }); }
+        }
+      }
+    }
     // --- TEAM RUNS. The board every client can read (team-store.js).
     //   GET  /v1/teams/runs[?limit&team]     → { ok, runs }            newest first, no boards
     //   POST /v1/teams/runs { id, team, request, client } → { ok, run }
