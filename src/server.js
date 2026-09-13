@@ -37,6 +37,7 @@ import { createPrefsStore } from './prefs-store.js';
 import { createTeamStore, loadOrCreateKey as loadTeamKey } from './team-store.js';
 import { createScorecardStore } from './scorecard-store.js';
 import { createEngineLedgerStore } from './engine-ledger-store.js';
+import { createProjectStore } from './project-store.js';
 import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackups } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
@@ -60,7 +61,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.89';
+export const VERSION = '0.6.90';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -71,6 +72,7 @@ const memoryStore = await createMemoryStore();
 const prefsStore = createPrefsStore();
 const scorecards = createScorecardStore({ key: loadTeamKey() });
 const engines = createEngineLedgerStore({ key: loadTeamKey() });
+const projectStore = createProjectStore({ key: loadTeamKey() });
 const teamStore = createTeamStore({ scorecards, engines });
 // Who is watching prefs change — a client with a live subscription is told the moment a
 // section is written by the other client, instead of waiting for its next focus.
@@ -720,7 +722,7 @@ export function createGateway(cfg = loadConfig()) {
     // Client preferences travel between the extension and the desktop through here, and an
     // MCP server entry can carry an Authorization header — so READS are gated too, unlike
     // history and memory. A drive-by page must not learn what tools the user connected.
-    if ((pathname === '/v1/prefs' || pathname.startsWith('/v1/prefs/') || pathname.startsWith('/v1/teams') || pathname.startsWith('/v1/agents')) && !isAdminAuthorized(req)) {
+    if ((pathname === '/v1/prefs' || pathname.startsWith('/v1/prefs/') || pathname.startsWith('/v1/teams') || pathname.startsWith('/v1/agents') || pathname.startsWith('/v1/projects')) && !isAdminAuthorized(req)) {
       return sendJson(res, 403, { error: { message: 'prefs: extension origin or gateway token required', type: 'forbidden' } });
     }
     // The access log is who-read-what — sensitive, and writable only by the local MCP
@@ -834,6 +836,55 @@ export function createGateway(cfg = loadConfig()) {
       return undefined;
     }
 
+    // --- PROJECTS. The page a goal starts on and everything done for it (project-store.js):
+    //   GET  /v1/projects[?limit&status]        → { ok, projects }   newest activity first, jobs counted
+    //   POST /v1/projects { id, project, by }    → { ok, project }    open a record (idempotent) / update the page
+    //   GET  /v1/projects/jobs                   → { ok, jobs }       the job board: every open posting across projects
+    //   GET  /v1/projects/:id[?events=1]         → { ok, project }    the record: jobs, runs, spend, decisions, report
+    //   POST /v1/projects/:id/events { events }  → { ok, project }    the executive loop appends (status, run.linked, run.spent, decision, report)
+    //   POST /v1/projects/:id/jobs { job, by }   → { ok, project }    post a job
+    //   POST /v1/projects/:id/jobs/:jobId { patch, by } → { ok, project }  move it along its machine / applications / recruited / result
+    //   GET  /v1/projects/:id/events[?after]     (SSE)                hello, replay, then live
+    //   DELETE /v1/projects/:id
+    if (pathname === '/v1/projects' && req.method === 'GET') return sendJson(res, 200, { ok: true, projects: projectStore.list({ limit: url.searchParams.get('limit') || 50, status: url.searchParams.get('status') || '' }) });
+    if (pathname === '/v1/projects/jobs' && req.method === 'GET') return sendJson(res, 200, { ok: true, jobs: projectStore.openJobs() });
+    if (pathname === '/v1/projects' && req.method === 'POST') {
+      try {
+        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+        return sendJson(res, 200, { ok: true, project: projectStore.create({ id: body.id || body.project?.id, project: body.project || null, by: body.by }) });
+      } catch (e) { return sendJson(res, 400, { error: { message: `project: ${e.message}`, type: 'project_error' } }); }
+    }
+    {
+      const m = /^\/v1\/projects\/([a-zA-Z0-9_-]{1,64})(\/events|\/jobs(?:\/([a-zA-Z0-9_-]{1,64}))?)?$/.exec(pathname);
+      if (m) {
+        const id = m[1]; const sub = m[2] || ''; const jobId = m[3] || '';
+        const notFound = () => sendJson(res, 404, { error: { message: `no project ${id}`, type: 'not_found' } });
+        if (!sub && req.method === 'GET') { const p = projectStore.get(id, { events: url.searchParams.get('events') === '1' }); return p ? sendJson(res, 200, { ok: true, project: p }) : notFound(); }
+        if (!sub && req.method === 'DELETE') return sendJson(res, 200, { ok: true, removed: projectStore.remove(id) });
+        if (req.method === 'POST' && (sub === '/events' || sub.startsWith('/jobs'))) {
+          try {
+            const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+            const by = String(body.by || 'person').slice(0, 80);
+            const project = sub === '/events' ? projectStore.append(id, body.events || [])
+              : jobId ? projectStore.updateJob(id, jobId, body.patch || body, { by })
+                : projectStore.postJob(id, body.job || body, { by });
+            return sendJson(res, 200, { ok: true, project });
+          } catch (e) { return sendJson(res, e.message.startsWith('no ') ? 404 : 400, { error: { message: `project: ${e.message}`, type: 'project_error' } }); }
+        }
+        if (sub === '/events' && req.method === 'GET') {
+          if (!projectStore.get(id)) return notFound();
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+          const sendEv = (ev) => res.write(`data: ${JSON.stringify(ev)}\n\n`);
+          let last = url.searchParams.has('after') ? Number(url.searchParams.get('after')) : -1;
+          sendEv({ seq: -1, type: 'hello', at: Date.now(), payload: { project: projectStore.get(id), after: last } });
+          const off = projectStore.watch(id, (ev) => { if (ev.seq > last) { last = ev.seq; sendEv(ev); } });
+          for (const ev of projectStore.eventsSince(id, last)) { last = ev.seq; sendEv(ev); }
+          const beat = setInterval(() => { try { res.write(': keep\n\n'); } catch { /* closed */ } }, 25_000);
+          req.on('close', () => { clearInterval(beat); off(); });
+          return undefined;
+        }
+      }
+    }
     // --- SCORECARDS. Every agent's attested record (scorecard-store.js): the chain, its card,
     //     whether it verifies; a person's rating appended from either client.
     if (pathname === '/v1/agents/scorecards' && req.method === 'GET') return sendJson(res, 200, { ok: true, agents: scorecards.list() });
