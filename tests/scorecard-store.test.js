@@ -18,7 +18,7 @@ test('a run\'s task.scored becomes an attested entry on the member\'s chain; a p
   teams.create({ id: 'run_sc1', team: 't', request: 'q', client: 'desktop' });
   teams.append('run_sc1', [
     { type: 'run.started', at: Date.now(), team: 't' }, { type: 'plan.ready', at: Date.now(), tasks: [{ id: 't1', role: 'researcher' }] },
-    { type: 'task.scored', at: Date.now(), agentId: 'researcher', taskId: 't1', role: 'researcher', model: 'claude', outcome: 'task.done', size: { ms: 90000, steps: 17, tools: 6, findings: 27, tokens: 0 }, roleKind: 'ic', tools: ['find', 'board'], with: ['budget_checker'], refs: ['run:run_sc1'] },
+    { type: 'task.scored', at: Date.now(), agentId: 'researcher', taskId: 't1', role: 'researcher', model: 'claude', engine: { kind: 'harness', id: 'claude', model: 'opus' }, scm: { repo: '/r', branch: 'cp/p/j', head: 'a1', headAfter: 'b2', commits: 2 }, outcome: 'task.done', size: { ms: 90000, steps: 17, tools: 6, findings: 27, tokens: 0 }, roleKind: 'ic', tools: ['find', 'board'], with: ['budget_checker'], refs: ['run:run_sc1'] },
   ]);
   await sc._queue; // appends are serialised behind the fold
   let card = await sc.get('researcher');
@@ -27,6 +27,10 @@ test('a run\'s task.scored becomes an attested entry on the member\'s chain; a p
   assert.ok(card.entries[0].sig, 'the store marked it');
   assert.equal(card.verified.ok, true); assert.equal(card.attested.ok, true);
   assert.equal(card.summary.jobsDone, 1); assert.deepEqual(card.summary.workedWith, ['budget_checker']);
+  // The engine and the checkout travel with the fact — attested like the rest of it.
+  assert.deepEqual(card.entries[0].engine, { kind: 'harness', id: 'claude', model: 'opus' });
+  assert.equal(card.entries[0].scm.commits, 2);
+  assert.deepEqual(card.summary.scm, { tasks: 1, commits: 2, prs: 0, merged: 0 });
   // A person rates the work.
   await sc.append({ agentId: 'researcher', kind: 'rating', runId: 'run_sc1', rating: { by: 'person', score: 0.9, note: 'thorough' } });
   // The file is what survives; a fresh store reads it back and it still verifies with the same key.
@@ -34,6 +38,7 @@ test('a run\'s task.scored becomes an attested entry on the member\'s chain; a p
   card = await again.get('researcher');
   assert.equal(card.entries.length, 2);
   assert.equal(card.summary.rating.avg, 0.9);
+  assert.deepEqual(card.summary.byEngine.map((r) => [r.key, r.tasks, r.rating.avg]), [['harness:claude/opus', 1, 0.9]], 'the rating followed its task to the engine');
   assert.equal(card.verified.ok, true); assert.equal(card.attested.ok, true);
   // Another install's key does not attest this chain; the chain itself still holds.
   const other = createScorecardStore({ storePath: join(dir, 'sc.json'), key: randomBytes(32) });

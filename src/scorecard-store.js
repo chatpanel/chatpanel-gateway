@@ -82,7 +82,7 @@ export class ScorecardStore {
     if (!p.agentId) return null;
     return this.append({
       agentId: p.agentId, kind: p.outcome === 'task.failed' ? 'task.failed' : 'task.done', at: ev.at,
-      runId: run?.id || p.runId, taskId: p.taskId, model: p.model, size: p.size, roleKind: p.roleKind,
+      runId: run?.id || p.runId, taskId: p.taskId, model: p.model, engine: p.engine, scm: p.scm, size: p.size, roleKind: p.roleKind,
       tools: p.tools, with: p.with, refs: p.refs, error: p.error,
       ...(run?.projectId ? { projectId: run.projectId } : {}), ...(run?.jobId ? { jobId: run.jobId } : {}),
     }).catch(() => null);
