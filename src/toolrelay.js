@@ -35,15 +35,32 @@ export function toolsToSpecs(tools) {
     .map((t) => ({ name: t.function.name, description: t.function.description || '', parameters: t.function.parameters || { type: 'object', properties: {} } }));
 }
 
-export function createRelaySession({ vault, redactOpts, bridgeUrl, token, harness = null }) {
+// A parked session lives while something is happening on it. The limit is IDLE time —
+// re-armed on every tool result the client brings back and every chunk the agent sends —
+// not time since the turn began: a flat 135 s from the start killed every relayed turn
+// with more than a handful of tool rounds, at 135.1 s exactly, and the client read the
+// empty resume as "the model returned no answer". A team member's turn is many rounds.
+export const RELAY_IDLE_MS = 135_000; // the bridge's own tool-call timeout is 120 s
+
+export function createRelaySession({ vault, redactOpts, bridgeUrl, token, harness = null, idleMs = RELAY_IDLE_MS }) {
   const id = randomUUID().slice(0, 8);
-  const s = { id, reader: null, decoder: new TextDecoder(), buf: '', bridgeSessionId: null, toolId: null, vault: vault || createVault(), redactOpts: redactOpts || { tier: 'basic' }, bridgeUrl, token, harness, done: false };
+  const s = { id, reader: null, decoder: new TextDecoder(), buf: '', bridgeSessionId: null, toolId: null, vault: vault || createVault(), redactOpts: redactOpts || { tier: 'basic' }, bridgeUrl, token, harness, done: false, idleMs, ttl: null, startedAt: Date.now(), rounds: 0 };
   sessions.set(id, s);
+  touchRelaySession(id);
   return s;
 }
 export const getRelaySession = (id) => sessions.get(id);
+/** Something happened on the session: the idle clock starts over. */
+export function touchRelaySession(id) {
+  const s = sessions.get(id);
+  if (!s) return;
+  if (s.ttl) clearTimeout(s.ttl);
+  s.ttl = setTimeout(() => endRelaySession(id), s.idleMs);
+  if (typeof s.ttl.unref === 'function') s.ttl.unref();
+}
 export function endRelaySession(id) {
   const s = sessions.get(id);
+  if (s?.ttl) clearTimeout(s.ttl);
   if (s?.reader) { try { s.reader.cancel(); } catch { /* ignore */ } }
   sessions.delete(id);
 }

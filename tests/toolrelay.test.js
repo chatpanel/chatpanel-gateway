@@ -91,3 +91,18 @@ test('relay: tool_request → OpenAI tool_call (args restored), then result → 
 
   gw.close(); br.close();
 });
+
+test('a parked session lives on IDLE time: a round re-arms it, so a long tool-using turn is not ended at 135 s from its start', async () => {
+  const { createRelaySession, getRelaySession, touchRelaySession, endRelaySession } = await import('../src/toolrelay.js');
+  const s = createRelaySession({ vault: null, redactOpts: null, bridgeUrl: 'http://127.0.0.1:1', token: '', idleMs: 40 });
+  await new Promise((r) => setTimeout(r, 25));
+  touchRelaySession(s.id); // a tool result came back
+  await new Promise((r) => setTimeout(r, 25));
+  assert.ok(getRelaySession(s.id), 'alive 50 ms in, because a round happened at 25 ms');
+  touchRelaySession(s.id);
+  await new Promise((r) => setTimeout(r, 25));
+  assert.ok(getRelaySession(s.id), 'still alive after another round');
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(getRelaySession(s.id), undefined, 'gone once nothing happened for the idle time');
+  endRelaySession(s.id);
+});

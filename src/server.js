@@ -27,7 +27,7 @@ import { ensureGatewayToken, isAdminAuthorized } from './gateway-token.js';
 import { resolveBridgeUrl } from './bridge.js';
 import { secureFetch } from './secure-fetch.js';
 import { streamBridgeChat, readBridgeToken, openBridgeChat } from './bridge.js';
-import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId } from './toolrelay.js';
+import { createRelaySession, getRelaySession, endRelaySession, pumpBridgeStream, deliverToolResult, toolsToSpecs, parseToolCallId, touchRelaySession } from './toolrelay.js';
 import { shaperFor } from './shape.js';
 import { startNer, ensureNer } from './ner.js';
 import { installTimestampedConsole } from './log.js';
@@ -58,7 +58,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.82';
+export const VERSION = '0.6.83';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -380,9 +380,9 @@ async function pumpRelay(res, s, shaper, trace) {
   let first = true;
   const tick = () => { if (trace && first) { trace.lap('upstream', t0); sStart = trace.clock(); first = false; } };
   await pumpBridgeStream(s, {
-    onText: (text) => { tick(); const r = restorer.push(text); if (r) res.write(shaper.sseDelta(r)); },
+    onText: (text) => { tick(); touchRelaySession(s.id); const r = restorer.push(text); if (r) res.write(shaper.sseDelta(r)); },
     onToolRequest: ({ name, restoredArgs, toolId }) => {
-      tick();
+      tick(); touchRelaySession(s.id);
       const tail = restorer.flush(); if (tail) res.write(shaper.sseDelta(tail));
       res.write(shaper.sseToolCalls([{ id: toolId, name, arguments: JSON.stringify(restoredArgs) }]));
       res.write(shaper.sseToolFinish());
@@ -403,14 +403,15 @@ async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, 
   // handler), but the custom dictionary stays capped for free.
   const redactOpts = { tier: cfg.redaction.tier === 'full' ? 'full' : 'basic', dictionary: gatedDictionary(cfg.redaction, isPro), entities: [] };
   const bridgeUrl = await resolveBridgeUrl(cfg);
+  // The session's life is idle time, re-armed on every round (toolrelay.js) — not a flat
+  // clock from here, which ended every long tool-using turn at 135 s.
   const s = createRelaySession({ vault, redactOpts, bridgeUrl, token, harness });
-  const ttl = setTimeout(() => endRelaySession(s.id), 135_000); // bridge tool-call timeout is 120s
   // The placeholder note is already in `system` (injected into the body after
   // redaction in the main handler), so toTurn() carried it here — nothing to add.
   let resp;
   try {
     resp = await openBridgeChat({ bridgeUrl, agent, token, messages, system, specs: toolsToSpecs(tools), options: bridgeAgentOptions(cfg), signal: undefined });
-  } catch (e) { clearTimeout(ttl); endRelaySession(s.id); trace?.commit(); return sendJson(res, 502, { error: { message: `bridge: ${e.message}`, type: 'bridge_error' } }); }
+  } catch (e) { endRelaySession(s.id); trace?.commit(); return sendJson(res, 502, { error: { message: `bridge: ${e.message}`, type: 'bridge_error' } }); }
   s.reader = resp.body.getReader();
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
   res.write(shaper.sseHead());
@@ -421,6 +422,7 @@ async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, 
 // The relay redacts the tool result with ITS vault (the main handler skips
 // redaction for a relay-resume), so time that here as the 'redact' leg.
 async function resumeRelay(res, s, toolContent, model, trace = null) {
+  touchRelaySession(s.id); s.rounds = (s.rounds || 0) + 1;
   try {
     const rd0 = trace ? trace.clock() : 0;
     await deliverToolResult(s, toolContent);
