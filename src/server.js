@@ -34,6 +34,7 @@ import { installTimestampedConsole } from './log.js';
 import { saveBackupSecret, clearBackupSecret, loadBackupSecret, hasBackupSecret } from './history-store.js';
 import { createMemoryStore } from './memory-store.js';
 import { createPrefsStore } from './prefs-store.js';
+import { createTeamStore } from './team-store.js';
 import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackups } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
@@ -57,7 +58,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.77';
+export const VERSION = '0.6.78';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -66,6 +67,11 @@ export const VERSION = '0.6.77';
 const historyStore = await createHistoryStore();
 const memoryStore = await createMemoryStore();
 const prefsStore = createPrefsStore();
+const teamStore = createTeamStore();
+// Who is watching prefs change — a client with a live subscription is told the moment a
+// section is written by the other client, instead of waiting for its next focus.
+const prefsWatchers = new Set();
+const notifyPrefs = (applied, by) => { for (const fn of prefsWatchers) { try { fn({ applied, by, revision: prefsStore.revision }); } catch { /* gone */ } } };
 
 // OBSERVABILITY — a ring of "which agent read what, when", persisted across restarts (the
 // gateway updates often; an empty panel after each restart reads as "nothing is set up").
@@ -698,7 +704,7 @@ export function createGateway(cfg = loadConfig()) {
     // Client preferences travel between the extension and the desktop through here, and an
     // MCP server entry can carry an Authorization header — so READS are gated too, unlike
     // history and memory. A drive-by page must not learn what tools the user connected.
-    if (pathname === '/v1/prefs' && !isAdminAuthorized(req)) {
+    if ((pathname === '/v1/prefs' || pathname.startsWith('/v1/prefs/') || pathname.startsWith('/v1/teams')) && !isAdminAuthorized(req)) {
       return sendJson(res, 403, { error: { message: 'prefs: extension origin or gateway token required', type: 'forbidden' } });
     }
     // The access log is who-read-what — sensitive, and writable only by the local MCP
@@ -785,6 +791,7 @@ export function createGateway(cfg = loadConfig()) {
       try {
         const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
         const out = prefsStore.put(body.sections || {}, { by: body.by || '' });
+        if (out.applied.length) notifyPrefs(out.applied, body.by || '');
         return sendJson(res, 200, { ok: true, ...out });
       } catch (e) {
         return sendJson(res, 400, { error: { message: `prefs write failed: ${e.message}`, type: 'prefs_error' } });
@@ -792,7 +799,87 @@ export function createGateway(cfg = loadConfig()) {
     }
     if (pathname === '/v1/prefs' && req.method === 'DELETE') {
       const section = String(url.searchParams.get('section') || '');
-      return sendJson(res, 200, { ok: true, removed: section ? prefsStore.remove(section) : false });
+      const removed = section ? prefsStore.remove(section) : false;
+      if (removed) notifyPrefs([section], '');
+      return sendJson(res, 200, { ok: true, removed });
+    }
+    // Live prefs: one SSE stream a client keeps open, told which sections the OTHER client
+    // wrote. Without it a team defined on the desktop reached the extension at its next
+    // focus; with it, at once. `{ type: 'hello', revision }` first, so a reader knows where
+    // it stands; a heartbeat keeps proxies from closing an idle stream.
+    if (pathname === '/v1/prefs/events' && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+      const sendEv = (ev) => res.write(`data: ${JSON.stringify(ev)}\n\n`);
+      sendEv({ type: 'hello', revision: prefsStore.revision, stamps: prefsStore.stamps() });
+      const fn = (ev) => sendEv({ type: 'changed', ...ev });
+      prefsWatchers.add(fn);
+      const beat = setInterval(() => { try { res.write(': keep-alive\n\n'); } catch { /* closed */ } }, 25_000);
+      res.on('close', () => { prefsWatchers.delete(fn); clearInterval(beat); });
+      return undefined;
+    }
+
+    // --- TEAM RUNS. The board every client can read (team-store.js).
+    //   GET  /v1/teams/runs[?limit&team]     → { ok, runs }            newest first, no boards
+    //   POST /v1/teams/runs { id, team, request, client } → { ok, run }
+    //   GET  /v1/teams/runs/:id[?events=1]   → { ok, run }             the board, the tasks, the proposal
+    //   POST /v1/teams/runs/:id/events { events: [...] } → { ok, run } the running client appends
+    //   GET  /v1/teams/runs/:id/events[?after=seq] (SSE)              replay from `after`, then live
+    //   POST /v1/teams/runs/:id/stop         → { ok, run }             a stop request any client may make
+    //   DELETE /v1/teams/runs/:id            → { ok, removed }
+    if (pathname === '/v1/teams/runs' && req.method === 'GET') {
+      return sendJson(res, 200, { ok: true, runs: teamStore.list({ limit: url.searchParams.get('limit') || 50, team: url.searchParams.get('team') || '' }) });
+    }
+    if (pathname === '/v1/teams/runs' && req.method === 'POST') {
+      try {
+        const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+        return sendJson(res, 200, { ok: true, run: teamStore.create({ id: body.id, client: body.client, team: body.team, request: body.request }) });
+      } catch (e) {
+        return sendJson(res, 400, { error: { message: `team run: ${e.message}`, type: 'team_error' } });
+      }
+    }
+    {
+      const m = /^\/v1\/teams\/runs\/([a-zA-Z0-9_-]{4,64})(\/events|\/stop)?$/.exec(pathname);
+      if (m) {
+        const id = m[1];
+        const sub = m[2] || '';
+        if (!sub && req.method === 'GET') {
+          const run = teamStore.get(id, { events: url.searchParams.get('events') === '1' });
+          return run ? sendJson(res, 200, { ok: true, run }) : sendJson(res, 404, { error: { message: `no run ${id}`, type: 'not_found' } });
+        }
+        if (!sub && req.method === 'DELETE') return sendJson(res, 200, { ok: true, removed: teamStore.remove(id) });
+        if (sub === '/stop' && req.method === 'POST') {
+          const run = teamStore.stop(id);
+          return run ? sendJson(res, 200, { ok: true, run }) : sendJson(res, 404, { error: { message: `no run ${id}`, type: 'not_found' } });
+        }
+        if (sub === '/events' && req.method === 'POST') {
+          try {
+            const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+            return sendJson(res, 200, { ok: true, run: teamStore.append(id, body.events || []) });
+          } catch (e) {
+            return sendJson(res, e.message.startsWith('no run') ? 404 : 400, { error: { message: `team run: ${e.message}`, type: 'team_error' } });
+          }
+        }
+        if (sub === '/events' && req.method === 'GET') {
+          if (!teamStore.get(id)) return sendJson(res, 404, { error: { message: `no run ${id}`, type: 'not_found' } });
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+          const sendEv = (ev) => res.write(`data: ${JSON.stringify(ev)}\n\n`);
+          // `Number(null)` is 0, not NaN: an absent `after` must mean "from the start" (-1),
+          // or the first event of every run is skipped.
+          const after = url.searchParams.has('after') ? Number(url.searchParams.get('after')) : NaN;
+          // The record as it stands, FIRST — it flushes the headers (writeHead alone sends
+          // nothing, and a reader whose fetch has not resolved can miss the opening events),
+          // and a late reader gets the board without a second request. Then replay from
+          // `after`, then tail; the watcher is registered before the replay is read and
+          // duplicates are dropped by seq, so nothing lands in the gap.
+          let last = Number.isFinite(after) ? after : -1;
+          sendEv({ seq: -1, type: 'hello', at: Date.now(), payload: { run: teamStore.get(id), after: last } });
+          const off = teamStore.watch(id, (ev) => { if (ev.seq > last) { last = ev.seq; sendEv(ev); } });
+          for (const ev of teamStore.eventsSince(id, last)) { last = ev.seq; sendEv(ev); }
+          const beat = setInterval(() => { try { res.write(': keep-alive\n\n'); } catch { /* closed */ } }, 25_000);
+          res.on('close', () => { off(); clearInterval(beat); });
+          return undefined;
+        }
+      }
     }
 
     // --- MEMORY. Small, durable facts about the user, reachable by every local agent.
