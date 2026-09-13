@@ -405,8 +405,12 @@ async function pumpRelay(res, s, shaper, trace) {
 }
 
 // New tool-enabled turn: open the bridge with the client's tools as MCP specs.
-async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, isPro, tools, harness = null, trace = null) {
+async function startRelay(req, res, { kind, adapter, agent, run = null }, body, vault, cfg, isPro, tools, harness = null, trace = null) {
   const { messages, system } = adapter.toTurn(body);
+  // The model half of `claude/opus` and the team role's run options travel with a
+  // tool-using turn the same as with a plain one (handleBridge below).
+  const { agentModel } = parseAgentModel(body?.model, cfg);
+  const options = bridgeAgentOptions(cfg, { ...(agentModel ? { model: agentModel } : {}), ...(run || {}) });
   const token = readBridgeToken(cfg.bridge.token);
   const shaper = shaperFor(kind, body?.model || agent);
   // Full tier for everyone here (the free allowance is enforced in the main
@@ -420,7 +424,7 @@ async function startRelay(req, res, { kind, adapter, agent }, body, vault, cfg, 
   // redaction in the main handler), so toTurn() carried it here — nothing to add.
   let resp;
   try {
-    resp = await openBridgeChat({ bridgeUrl, agent, token, messages, system, specs: toolsToSpecs(tools), options: bridgeAgentOptions(cfg), signal: undefined });
+    resp = await openBridgeChat({ bridgeUrl, agent, token, messages, system, specs: toolsToSpecs(tools), options, signal: undefined });
   } catch (e) { endRelaySession(s.id); trace?.commit(); return sendJson(res, 502, { error: { message: `bridge: ${e.message}`, type: 'bridge_error' } }); }
   s.reader = resp.body.getReader();
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
@@ -444,7 +448,7 @@ async function resumeRelay(res, s, toolContent, model, trace = null) {
   return pumpRelay(res, s, shaper, trace);
 }
 
-async function handleBridge(req, res, { kind, adapter, redactable, pathname, agentOverride, harness, trace }, body, vault, cfg, isPro) {
+async function handleBridge(req, res, { kind, adapter, redactable, pathname, agentOverride, harness, trace, run = null }, body, vault, cfg, isPro) {
   if (!redactable) {
     trace?.commit();
     return sendJson(res, 404, { error: `endpoint ${pathname} not supported by the bridge backend` });
@@ -463,7 +467,7 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
     }
     const tools = adapter.extractTools(body);
     if (tools.length && body?.stream === true) {
-      return startRelay(req, res, { kind, adapter, agent: agentOverride || pickAgent(body?.model, cfg) }, body, vault, cfg, isPro, tools, harness, trace);
+      return startRelay(req, res, { kind, adapter, agent: agentOverride || pickAgent(body?.model, cfg), run }, body, vault, cfg, isPro, tools, harness, trace);
     }
   }
 
@@ -489,7 +493,7 @@ async function handleBridge(req, res, { kind, adapter, redactable, pathname, age
     bridgeUrl: await resolveBridgeUrl(cfg), agent, token, messages, system, signal: ac.signal,
     // Permissions and working directory from the gateway's config (the desktop's Settings →
     // Engine → Agents), plus the model half of `claude/opus` when the caller named one.
-    options: bridgeAgentOptions(cfg, agentModel ? { model: agentModel } : {}),
+    options: bridgeAgentOptions(cfg, { ...(agentModel ? { model: agentModel } : {}), ...(run || {}) }),
   };
 
   if (!wantStream) {
@@ -2071,6 +2075,10 @@ export function createGateway(cfg = loadConfig()) {
     const hint = {
       destination: String(req.headers['x-chatpanel-destination'] || legacy?.destination || '').trim(),
       reach: String(req.headers['x-chatpanel-reach'] || legacy?.reach || '').trim(),
+      // A TEAM ROLE'S RUN, for the bridge (pillars §14.2): `{ grants, workspace, connectionId }`
+      // — URI-encoded JSON in a header (the body belongs to the provider), the legacy body
+      // field also honoured. Only the bridge path reads it; an API destination never sees it.
+      run: readRunHint(req.headers['x-chatpanel-run'], legacy?.run),
     };
     const dest = resolveDestination(body?.model, cfg, r.kind, { destination: hint.destination });
     // An EXPLICIT destination that does not resolve is an error, not an invitation to fall
@@ -2097,8 +2105,23 @@ export function createGateway(cfg = loadConfig()) {
       }
       return handleApi(req, res, { ...r, pathname, search: url.search, base: dest.baseUrl, destKey: dest.apiKey, destProtocol: dest.protocol, harness, trace }, outBody, vault);
     }
-    return handleBridge(req, res, { ...r, pathname, agentOverride: dest?.agent, harness, trace }, body, vault, cfg, isPro);
+    return handleBridge(req, res, { ...r, pathname, agentOverride: dest?.agent, harness, trace, run: hint.run }, body, vault, cfg, isPro);
   });
+}
+
+/** `{ grants[], workspace{ repo, projectId, jobId, base? }, connectionId }` from the header or the legacy field — shaped, never a token. */
+function readRunHint(header, legacy) {
+  let raw = legacy && typeof legacy === 'object' ? legacy : null;
+  if (!raw && header) { try { raw = JSON.parse(decodeURIComponent(String(header))); } catch { raw = null; } }
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+  if (Array.isArray(raw.grants)) out.grants = raw.grants.map((g) => String(g).slice(0, 80)).slice(0, 32);
+  if (raw.workspace && typeof raw.workspace === 'object' && raw.workspace.repo) {
+    const w = raw.workspace;
+    out.workspace = { repo: String(w.repo).slice(0, 400), projectId: String(w.projectId || '').slice(0, 120), jobId: String(w.jobId || '').slice(0, 120), ...(w.base ? { base: String(w.base).slice(0, 120) } : {}) };
+  }
+  if (raw.connectionId) out.connectionId = String(raw.connectionId).slice(0, 64);
+  return Object.keys(out).length ? out : null;
 }
 
 export function start(cfg = loadConfig()) {
