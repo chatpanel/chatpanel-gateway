@@ -94,7 +94,7 @@ test('invisible Unicode is stripped and counted — it is a redaction bypass, no
 test('THE PREVIEW IS WHAT IS SENT — same text, same string on the wire', async () => {
   let seen = null;
   const up = await fakeUpstream((body, req, res) => {
-    seen = JSON.parse(body).messages[0].content;
+    seen = JSON.parse(body).messages.find((m) => m.role === 'user').content;
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
   });

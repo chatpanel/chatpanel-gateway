@@ -33,7 +33,7 @@ test('chat/completions: upstream sees redacted, client gets restored (non-stream
     seenBody = body;
     res.writeHead(200, { 'content-type': 'application/json' });
     // Echo a placeholder back as if the model repeated it.
-    const token = JSON.parse(body).messages[0].content.match(/\[\[EMAIL_1\]\]/)[0];
+    const token = JSON.parse(body).messages.find((m) => m.role === 'user').content.match(/\[\[EMAIL_1\]\]/)[0];
     res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: `mail to ${token}` } }] }));
   });
   const gw = createGateway(cfg(`http://127.0.0.1:${up.port}`));
@@ -53,7 +53,7 @@ test('chat/completions: upstream sees redacted, client gets restored (non-stream
 
 test('streaming SSE restores tokens (even split across chunks)', async () => {
   const up = await fakeUpstream((body, req, res) => {
-    const token = JSON.parse(body).messages[0].content.match(/\[\[EMAIL_1\]\]/)[0];
+    const token = JSON.parse(body).messages.find((m) => m.role === 'user').content.match(/\[\[EMAIL_1\]\]/)[0];
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     const mid = Math.floor(token.length / 2);
     res.write(`data: {"choices":[{"delta":{"content":"to ${token.slice(0, mid)}`);
@@ -249,7 +249,7 @@ test('/logs detail: off by default — counts only, no breakdown', async () => {
 
 test('streaming: timing splits into model (time-to-first-token) + stream (generation)', async () => {
   const up = await fakeUpstream((body, req, res) => {
-    const token = JSON.parse(body).messages[0].content.match(/\[\[EMAIL_1\]\]/)[0];
+    const token = JSON.parse(body).messages.find((m) => m.role === 'user').content.match(/\[\[EMAIL_1\]\]/)[0];
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.write(`data: {"choices":[{"delta":{"content":"to ${token}"}}]}\n\n`);
     res.write('data: [DONE]\n\n');

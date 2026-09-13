@@ -22,7 +22,7 @@ import { loadConfig } from './config.js';
 import { startEntitlementRefresh, maybeRevalidate } from './entitlement-refresh.js';
 import { redactSegments, segment } from './redact.js';
 import { pipeRestoredStream, pipeRestoredOpenAIStream, makeTokenRestorer, restoreDeep } from './stream.js';
-import { restoreText, gatedDictionary, narrowSpecs, makeToolHarness, placeholderToolNote, assertEndpointUrl } from '@chatpanel/pii';
+import { restoreText, gatedDictionary, narrowSpecs, makeToolHarness, placeholderToolNote, placeholderNote, assertEndpointUrl } from '@chatpanel/pii';
 import { ensureGatewayToken, isAdminAuthorized } from './gateway-token.js';
 import { resolveBridgeUrl } from './bridge.js';
 import { secureFetch } from './secure-fetch.js';
@@ -58,7 +58,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.79';
+export const VERSION = '0.6.80';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -1936,6 +1936,10 @@ export function createGateway(cfg = loadConfig()) {
           });
           const ownTools = !(early && early.type === 'api');
           r.adapter.injectSystemNote(body, placeholderToolNote({ toolData: cfg.tools?.toolData, ownTools }));
+        } else if (!redactionOff && count > 0 && typeof r.adapter.injectSystemNote === 'function') {
+          // No tools, but something WAS replaced: the model still meets [[LOCATION_1]] and, told
+          // nothing, a coding agent stops to ask what the "unresolved placeholder" means.
+          r.adapter.injectSystemNote(body, placeholderNote());
         }
         outBody = Buffer.from(JSON.stringify(body), 'utf8');
       }
