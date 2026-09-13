@@ -60,6 +60,10 @@ export function resolveDestination(model, cfg, kind, { destination = '' } = {}) 
     // matches its own agent destination here — so it ALWAYS goes to the bridge).
     (model && dests.find((d) => Array.isArray(d.models) && d.models.includes(model)))
     || (model && dests.find((d) => d.id === model || d.agent === model))
+    // `claude/opus` names an agent AND the model it should run: the agent's own destination,
+    // never the backend default — which is codex, and "Codex exited 1" on a model it has no
+    // idea about was how a whole team came back empty.
+    || (model && model.includes('/') && dests.find((d) => d.type === 'agent' && (d.agent === model.slice(0, model.indexOf('/')) || d.id === model.slice(0, model.indexOf('/')))))
     // No match: fall back to the BACKEND's natural default — an API destination on the
     // api backend, an agent on the bridge backend. Never silently send an unknown
     // model name to a CLI agent (that's why gemma must not hit codex).

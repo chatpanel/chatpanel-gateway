@@ -65,3 +65,20 @@ test('the legacy body field is still accepted, and removed rather than forwarded
   assert.match(server, /delete body\.chatpanel;/, 'accepted for compatibility, never forwarded');
   assert.match(server, /legacy\?\.destination/, 'and it still selects a destination');
 });
+
+test('claude/opus goes to the claude agent, never to the backend default agent', () => {
+  const bridgeCfg = {
+    backend: 'bridge',
+    bridge: { url: 'http://127.0.0.1:4319', agent: 'codex' },
+    destinations: [
+      { id: 'codex', type: 'agent', agent: 'codex' },
+      { id: 'claude', type: 'agent', agent: 'claude' },
+      { id: 'NVIDIA', type: 'api', protocol: 'openai', baseUrl: 'https://integrate.api.nvidia.com/v1', models: ['nim/model-x'] },
+    ],
+  };
+  assert.equal(resolveDestination('claude/opus', bridgeCfg, 'openai').id, 'claude');
+  assert.equal(resolveDestination('codex/gpt-5', bridgeCfg, 'openai').id, 'codex');
+  assert.equal(resolveDestination('claude', bridgeCfg, 'openai').id, 'claude');
+  assert.equal(resolveDestination('nim/model-x', bridgeCfg, 'openai').id, 'NVIDIA', 'a provider model with a slash still finds its provider first');
+  assert.equal(resolveDestination('nobody/at-all', bridgeCfg, 'openai').id, 'codex', 'an unknown id still takes the backend default');
+});
