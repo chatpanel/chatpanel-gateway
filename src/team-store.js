@@ -20,7 +20,8 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from '
 import { join, dirname } from 'node:path';
 import os from 'node:os';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
-import { foldBoard, emptyBoardState } from './team-board.js';
+import { emptyBoardState } from './team-board.js';
+import { foldRun, emptyRun, checkpointFrom, isResumable, LIVE_RUN_STATUSES } from './team-record.js';
 
 const DIR = join(os.homedir(), '.chatpanel');
 const STORE_PATH = process.env.CHATPANEL_TEAMS_STORE || join(DIR, 'team-runs.enc');
@@ -31,7 +32,7 @@ export const MAX_EVENTS_PER_RUN = 2000;
 export const MAX_EVENT_BYTES = 64 * 1024;
 export const STALE_AFTER_MS = 5 * 60_000;
 const RUN_ID_RE = /^[a-zA-Z0-9_-]{4,64}$/;
-const LIVE = new Set(['planning', 'running', 'merging']);
+const LIVE = new Set(LIVE_RUN_STATUSES);
 
 function loadOrCreateKey() {
   try { if (existsSync(KEY_PATH)) return Buffer.from(readFileSync(KEY_PATH, 'utf8').trim(), 'base64'); } catch { /* regenerate */ }
@@ -53,50 +54,8 @@ function decrypt(key, env) {
 }
 const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
 
-/** Apply one event to a run record. The record is the fold of its events. */
-export function applyEvent(run, ev) {
-  const type = String(ev?.type || '');
-  const p = ev?.payload && typeof ev.payload === 'object' ? ev.payload : {};
-  run.lastEventAt = ev.at;
-  switch (type) {
-    case 'run.started':
-      run.team = p.team || run.team; run.request = p.request ?? run.request; run.budget = p.budget || run.budget;
-      run.roles = Array.isArray(p.roles) ? p.roles : run.roles; run.status = 'planning'; run.startedAt = run.startedAt || ev.at;
-      break;
-    case 'plan.ready':
-      run.plan = { by: p.by || 'fixed', tasks: Array.isArray(p.tasks) ? p.tasks : [] };
-      run.tasks = run.plan.tasks.map((t) => ({ id: t.id, role: t.role, title: t.title, status: 'pending', findings: 0 }));
-      run.status = 'running';
-      break;
-    case 'task.started': { const t = run.tasks.find((x) => x.id === p.taskId); if (t) { t.status = 'running'; t.startedAt = ev.at; } run.status = 'running'; break; }
-    case 'task.delta': { const t = run.tasks.find((x) => x.id === p.taskId); if (t) t.text = String(p.text || '').slice(0, 20_000); break; }
-    case 'task.finding':
-      if (p.finding && p.finding.text) { run.board.push({ ...p.finding, at: ev.at }); const t = run.tasks.find((x) => x.id === p.taskId); if (t) t.findings += 1; }
-      break;
-    case 'task.done':
-    case 'task.failed': { const t = run.tasks.find((x) => x.id === p.taskId); if (t) { t.status = p.status || (type === 'task.done' ? 'ok' : 'failed'); t.error = p.error || null; t.ms = p.ms; } break; }
-    case 'run.merging': run.status = 'merging'; break;
-    case 'run.done':
-      run.status = p.status || 'completed'; run.usage = p.usage || run.usage; run.proposal = p.proposal ?? run.proposal; run.endedAt = ev.at;
-      break;
-    case 'run.stop-requested': run.stopRequested = ev.at; break;
-    // The board as a message board (events 0.81): threads, posts, replies, decisions, asks.
-    // Folded by the shared fold, so this record and both clients agree on it.
-    case 'board.thread': case 'board.post': case 'board.decision': case 'board.thread-status':
-      run.threads = foldBoard(run.threads || emptyBoardState(), ev);
-      if (type === 'board.thread-status' && p.status !== 'waiting' && run.status === 'waiting' && !(run.threads.threads || []).some((t) => t.kind === 'ask' && t.status === 'waiting')) run.status = 'answered';
-      break;
-    case 'task.waiting': { const t = run.tasks.find((x) => x.id === p.taskId); if (t) { t.status = 'waiting'; t.waitingOn = p.threadId; } break; }
-    case 'task.model': { const t = run.tasks.find((x) => x.id === p.taskId); if (t) t.model = p.model; break; }
-    case 'task.tool': { const t = run.tasks.find((x) => x.id === p.taskId); if (t) t.tools = (t.tools || 0) + 1; break; }
-    case 'run.usage': run.usage = p.usage || run.usage; break;
-    case 'run.waiting': run.status = 'running'; break;
-    case 'run.resumed': run.status = 'running'; run.endedAt = null; run.checkpoint = null; break;
-    default: break;
-  }
-  if (type === 'run.done' && p.checkpoint) run.checkpoint = p.checkpoint;
-  return run;
-}
+/** Apply one event to a run record — the shared fold (team-record.js, vendored from @chatpanel/events). */
+export function applyEvent(run, ev) { return foldRun(run, ev); }
 
 export class TeamStore {
   constructor({ storePath = STORE_PATH, now = () => Date.now(), staleAfterMs = STALE_AFTER_MS } = {}) {
@@ -126,7 +85,7 @@ export class TeamStore {
     renameSync(tmp, this.path);
   }
   _fresh(id, { client = '' } = {}) {
-    return { id, client: String(client || '').slice(0, 40), createdAt: this.now(), lastEventAt: this.now(), status: 'planning', team: '', request: '', roles: [], plan: null, tasks: [], board: [], threads: emptyBoardState(), checkpoint: null, proposal: null, usage: null, stopRequested: null, events: [] };
+    return { ...emptyRun({ id, client, now: this.now() }), events: [] };
   }
   _evict() {
     if (this.runs.size <= MAX_RUNS) return;
@@ -138,6 +97,8 @@ export class TeamStore {
     const v = clone({ ...run, events: undefined });
     delete v.events;
     v.stale = LIVE.has(run.status) && this.now() - run.lastEventAt > this.staleAfterMs;
+    // Can a client pick this run up again? Not while its own client is live on it.
+    v.resumable = isResumable(v);
     if (events) v.events = clone(run.events);
     return v;
   }
@@ -179,7 +140,7 @@ export class TeamStore {
       .filter((r) => !team || r.team === team)
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, Math.max(1, Math.min(200, Number(limit) || 50)))
-      .map((r) => { const v = this._view(r); return { ...v, board: undefined, threads: undefined, checkpoint: undefined, tasks: v.tasks.map((t) => ({ ...t, text: undefined })), findings: r.board.length, waiting: (r.threads?.threads || []).filter((t) => t.kind === 'ask' && t.status === 'waiting').length }; });
+      .map((r) => { const v = this._view(r); return { ...v, board: undefined, threads: undefined, checkpoint: undefined, tasks: v.tasks.map((t) => ({ ...t, text: undefined, transcript: undefined })), findings: r.board.length, waiting: (r.threads?.threads || []).filter((t) => t.kind === 'ask' && t.status === 'waiting').length }; });
   }
   /** Ask the running client to stop. Recorded as an event, so watchers (the runner) see it. */
   /**
@@ -215,6 +176,29 @@ export class TeamStore {
     const at = this.now();
     const post = { id: `pp_${randomBytes(4).toString('hex')}`, threadId, by: String(by || 'person').slice(0, 40), kind: ['note', 'question', 'decision'].includes(kind) ? kind : 'note', text: String(text || '').slice(0, 4000), refs: [], replyTo: replyTo || null, status: 'open', at };
     return this.append(id, [{ type: 'board.post', at, post }]);
+  }
+  /** The checkpoint a client resumes from — the runner's own when the run ended with one, else built from the record. */
+  checkpoint(id) {
+    const run = this.runs.get(String(id || ''));
+    if (!run) throw new Error(`no run ${id}`);
+    return checkpointFrom(this._view(run));
+  }
+  /** A person hands a task to another model, from any client: the running client's tail acts on it. */
+  handoff(id, { taskId, model, by = 'person', reason = '' } = {}) {
+    const run = this.runs.get(String(id || ''));
+    if (!run) throw new Error(`no run ${id}`);
+    if (!run.tasks.some((t) => t.id === taskId)) throw new Error(`no task ${taskId}`);
+    if (!model) throw new Error('a model is required');
+    return this.append(id, [{ type: 'task.handoff-requested', at: this.now(), taskId, model: String(model).slice(0, 120), by: String(by || 'person').slice(0, 40), reason: String(reason || '').slice(0, 400) }]);
+  }
+  /** A client is taking a run over (resume): the record says so, and the old client's stop no longer applies. */
+  claim(id, { client = '' } = {}) {
+    const run = this.runs.get(String(id || ''));
+    if (!run) throw new Error(`no run ${id}`);
+    run.client = String(client || run.client || '').slice(0, 40);
+    run.stopRequested = null;
+    this.save();
+    return this._view(run);
   }
   stop(id) {
     const run = this.runs.get(String(id || ''));

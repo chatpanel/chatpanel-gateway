@@ -187,3 +187,40 @@ test('prefs changes are pushed to a live subscriber', async () => {
 });
 
 test.after(() => { if (shared) { shared.gw.closeAllConnections?.(); shared.gw.close(); } });
+
+test('a task\'s transcript is on the record; a run whose client died is resumable from its checkpoint; a hand-off from another client reaches the runner\'s tail', async () => {
+  const { base } = await gateway();
+  const id = `run_task_${Date.now().toString(36)}`;
+  await (await fetch(`${base}/v1/teams/runs`, { method: 'POST', headers: H, body: JSON.stringify({ id, team: 'travel', request: 'trip', client: 'desktop' }) })).json();
+  const tail = sse(await fetch(`${base}/v1/teams/runs/${id}/events`, { headers: H }));
+  await tail.until(1);
+  await (await fetch(`${base}/v1/teams/runs/${id}/events`, { method: 'POST', headers: H, body: JSON.stringify({ events: [
+    { type: 'run.started', at: Date.now(), team: 'travel' }, { type: 'plan.ready', at: Date.now(), tasks: [{ id: 't1', role: 'researcher', title: 'Find facts' }] },
+    { type: 'task.started', at: Date.now(), taskId: 't1', role: 'researcher' },
+    { type: 'task.model', at: Date.now(), taskId: 't1', role: 'researcher', model: 'claude', attempt: 1 },
+    { type: 'task.step', at: Date.now(), taskId: 't1', role: 'researcher', steps: [{ role: 'user', content: 'Find facts' }, { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'find', arguments: '{}' } }] }, { role: 'tool', tool_call_id: 'c1', content: 'Feb 15–19' }] },
+  ] }) })).json();
+  const rec = await (await fetch(`${base}/v1/teams/runs/${id}`, { headers: H })).json();
+  assert.equal(rec.run.tasks[0].transcript.length, 3, 'the task\'s conversation is on the record');
+  assert.equal(rec.run.tasks[0].model, 'claude');
+  assert.equal(rec.run.resumable, false, 'its client is live on it');
+  // The list hides transcripts.
+  const list = await (await fetch(`${base}/v1/teams/runs?limit=5`, { headers: H })).json();
+  assert.equal(list.runs.find((r) => r.id === id).tasks[0].transcript, undefined);
+  // A person hands the task to another model from the extension; the running client's tail sees it.
+  const ho = await (await fetch(`${base}/v1/teams/runs/${id}/handoff`, { method: 'POST', headers: H, body: JSON.stringify({ taskId: 't1', model: 'opus', reason: 'claude is slow' }) })).json();
+  assert.equal(ho.ok, true, JSON.stringify(ho));
+  await tail.until(7);
+  const req = tail.got.find((e) => e.type === 'task.handoff-requested');
+  assert.deepEqual([req.payload.taskId, req.payload.model, req.payload.by], ['t1', 'opus', 'person']);
+  // The process dies: no run.done ever arrives. The checkpoint is still buildable from the record.
+  const cp = await (await fetch(`${base}/v1/teams/runs/${id}/checkpoint`, { headers: H })).json();
+  assert.equal(cp.ok, true);
+  assert.equal(cp.checkpoint.tasks[0].status, 'stopped');
+  assert.equal(cp.checkpoint.tasks[0].transcript.length, 3);
+  // Another client claims it; its client name moves.
+  const claimed = await (await fetch(`${base}/v1/teams/runs/${id}/claim`, { method: 'POST', headers: H, body: JSON.stringify({ client: 'extension' }) })).json();
+  assert.equal(claimed.run.client, 'extension');
+  await tail.close();
+  await fetch(`${base}/v1/teams/runs/${id}`, { method: 'DELETE', headers: H });
+});
