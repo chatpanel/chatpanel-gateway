@@ -40,7 +40,7 @@ export function toolsToSpecs(tools) {
 // not time since the turn began: a flat 135 s from the start killed every relayed turn
 // with more than a handful of tool rounds, at 135.1 s exactly, and the client read the
 // empty resume as "the model returned no answer". A team member's turn is many rounds.
-export const RELAY_IDLE_MS = 135_000; // the bridge's own tool-call timeout is 120 s
+export const RELAY_IDLE_MS = 200_000; // longer than the bridge's own idle (180 s), which is the authority
 
 export function createRelaySession({ vault, redactOpts, bridgeUrl, token, harness = null, idleMs = RELAY_IDLE_MS }) {
   const id = randomUUID().slice(0, 8);
@@ -81,6 +81,10 @@ export async function pumpBridgeStream(s, handlers) {
         const payload = t.slice(5).trim();
         if (!payload || payload === '[DONE]') continue;
         let evt; try { evt = JSON.parse(payload); } catch { continue; }
+        // Anything the bridge sends is life: an agent running its own tools for two minutes
+        // sends only status events, and a session that counts only text and tool requests
+        // as activity ended those turns mid-work.
+        touchRelaySession(s.id);
         if (evt.type === 'delta' && typeof evt.text === 'string') {
           handlers.onText(evt.text);
         } else if (evt.type === 'tool_request') {
