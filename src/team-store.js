@@ -87,6 +87,9 @@ export function applyEvent(run, ev) {
       if (type === 'board.thread-status' && p.status !== 'waiting' && run.status === 'waiting' && !(run.threads.threads || []).some((t) => t.kind === 'ask' && t.status === 'waiting')) run.status = 'answered';
       break;
     case 'task.waiting': { const t = run.tasks.find((x) => x.id === p.taskId); if (t) { t.status = 'waiting'; t.waitingOn = p.threadId; } break; }
+    case 'task.model': { const t = run.tasks.find((x) => x.id === p.taskId); if (t) t.model = p.model; break; }
+    case 'task.tool': { const t = run.tasks.find((x) => x.id === p.taskId); if (t) t.tools = (t.tools || 0) + 1; break; }
+    case 'run.usage': run.usage = p.usage || run.usage; break;
     case 'run.waiting': run.status = 'running'; break;
     case 'run.resumed': run.status = 'running'; run.endedAt = null; run.checkpoint = null; break;
     default: break;
