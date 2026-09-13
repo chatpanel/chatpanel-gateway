@@ -58,8 +58,9 @@ const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)
 export function applyEvent(run, ev) { return foldRun(run, ev); }
 
 export class TeamStore {
-  constructor({ storePath = STORE_PATH, now = () => Date.now(), staleAfterMs = STALE_AFTER_MS, scorecards = null } = {}) {
+  constructor({ storePath = STORE_PATH, now = () => Date.now(), staleAfterMs = STALE_AFTER_MS, scorecards = null, engines = null } = {}) {
     this.scorecards = scorecards; // the agents' ledgers (scorecard-store.js), fed by task.scored
+    this.engines = engines; // the engines' ledgers (engine-ledger-store.js), fed by task.routed / reappointed / handoff / scored
     this.path = storePath;
     this.now = now;
     this.staleAfterMs = staleAfterMs;
@@ -134,6 +135,8 @@ export class TeamStore {
       applyEvent(run, ev);
       // A finished task's fact goes to the member's scorecard — chained and attested there.
       if (this.scorecards && ev.type === 'task.scored') this.scorecards.fromRunEvent(ev, run);
+      // …and to the engine's ledger: the call, or the decline / rotation that preceded it.
+      if (this.engines && (ev.type === 'task.routed' || ev.type === 'task.reappointed' || ev.type === 'task.handoff' || ev.type === 'task.scored')) this.engines.fromRunEvent(ev, run);
       for (const fn of this.watchers.get(run.id) || []) { try { fn(ev); } catch { /* a dead watcher */ } }
     }
     this.save();

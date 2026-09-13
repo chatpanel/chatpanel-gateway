@@ -36,6 +36,7 @@ import { createMemoryStore } from './memory-store.js';
 import { createPrefsStore } from './prefs-store.js';
 import { createTeamStore, loadOrCreateKey as loadTeamKey } from './team-store.js';
 import { createScorecardStore } from './scorecard-store.js';
+import { createEngineLedgerStore } from './engine-ledger-store.js';
 import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackups } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
@@ -59,7 +60,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.87';
+export const VERSION = '0.6.89';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -69,7 +70,8 @@ const historyStore = await createHistoryStore();
 const memoryStore = await createMemoryStore();
 const prefsStore = createPrefsStore();
 const scorecards = createScorecardStore({ key: loadTeamKey() });
-const teamStore = createTeamStore({ scorecards });
+const engines = createEngineLedgerStore({ key: loadTeamKey() });
+const teamStore = createTeamStore({ scorecards, engines });
 // Who is watching prefs change — a client with a live subscription is told the moment a
 // section is written by the other client, instead of waiting for its next focus.
 const prefsWatchers = new Set();
@@ -165,6 +167,12 @@ function fmtTimings(t) {
 //   restore  model output → harness[restore] → user response (non-stream; for
 //            streams restore is inline per chunk, so it's folded into stream)
 //   total    end-to-end through the gateway
+/** `model:<id>[/<model>]` / `harness:<id>[/<model>]` → the record's engine, or null. */
+function engineFromKey(key) {
+  const m = /^(model|harness):([^/]+)(?:\/(.+))?$/.exec(String(key || ''));
+  return m ? { kind: m[1], id: m[2], ...(m[3] ? { model: m[3] } : {}) } : null;
+}
+
 function mkTrace(sink) {
   const start = performance.now();
   const timings = {};
@@ -834,8 +842,40 @@ export function createGateway(cfg = loadConfig()) {
           try {
             const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
             const entry = await scorecards.append({ agentId, kind: 'rating', runId: body.runId, taskId: body.taskId, jobId: body.jobId, rating: { by: String(body.by || 'person').slice(0, 40), score: body.score, note: body.note, about: body.about }, refs: body.refs });
+            // The verdict is the engine's too: it lands on the ledger of what served the task.
+            engines.fromRating(scorecards.chains.get(agentId) || [], { ...entry, jobKind: body.jobKind ? String(body.jobKind).slice(0, 60) : undefined });
             return sendJson(res, 200, { ok: true, entry });
           } catch (e) { return sendJson(res, 400, { error: { message: `scorecard: ${e.message}`, type: 'scorecard_error' } }); }
+        }
+      }
+    }
+    // --- ENGINES. Every model's / harness's attested ledger (engine-ledger-store.js): the
+    //     card a client feeds applyCard, the chain on request; a host's observed call, a
+    //     person's price or capability proof appended from either client.
+    //   GET  /v1/engines[?minCalls]                → { ok, engines: [card] }
+    //   GET  /v1/engines/:key/card[?entries=1]     → { ok, key, card, entries?, verified?, attested? }
+    //   POST /v1/engines/:key/entries { kind, engine, call|rating|price|capability|declined, … }
+    if (pathname === '/v1/engines' && req.method === 'GET') {
+      const minCalls = Number(url.searchParams.get('minCalls')) || undefined;
+      return sendJson(res, 200, { ok: true, engines: engines.list({ minCalls }) });
+    }
+    {
+      const m = /^\/v1\/engines\/(.+)\/(card|entries)$/.exec(pathname);
+      if (m) {
+        const key = decodeURIComponent(m[1]).slice(0, 300);
+        if (m[2] === 'card' && req.method === 'GET') {
+          const minCalls = Number(url.searchParams.get('minCalls')) || undefined;
+          return sendJson(res, 200, { ok: true, ...(await engines.get(key, { entries: url.searchParams.get('entries') === '1', minCalls })) });
+        }
+        if (m[2] === 'entries' && req.method === 'POST') {
+          try {
+            const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+            const engine = body.engine || engineFromKey(key);
+            if (!engine) return sendJson(res, 400, { error: { message: 'model-ledger: engine required', type: 'model_ledger_error' } });
+            const entry = await engines.append({ ...body, engine, kind: body.kind || 'call' });
+            if (entry.key !== key) return sendJson(res, 400, { error: { message: `model-ledger: entry is for ${entry.key}, not ${key}`, type: 'model_ledger_error' } });
+            return sendJson(res, 200, { ok: true, entry });
+          } catch (e) { return sendJson(res, 400, { error: { message: `model-ledger: ${e.message}`, type: 'model_ledger_error' } }); }
         }
       }
     }
