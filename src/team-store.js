@@ -97,6 +97,9 @@ export class TeamStore {
     const v = clone({ ...run, events: undefined });
     delete v.events;
     v.stale = LIVE.has(run.status) && this.now() - run.lastEventAt > this.staleAfterMs;
+    // How long since the running client last wrote — a person who knows the process died
+    // does not have to wait for the stale mark to pick the run up.
+    v.quietMs = LIVE.has(run.status) ? Math.max(0, this.now() - run.lastEventAt) : 0;
     // Can a client pick this run up again? Not while its own client is live on it.
     v.resumable = isResumable(v);
     if (events) v.events = clone(run.events);
