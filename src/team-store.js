@@ -124,14 +124,23 @@ export class TeamStore {
     if (!run) throw new Error(`no run ${id}`);
     const list = Array.isArray(events) ? events : [events];
     let seq = run.events.length;
+    let stored = 0;
     for (const e of list) {
       if (!e || typeof e !== 'object' || !e.type) continue;
       let bytes; try { bytes = Buffer.byteLength(JSON.stringify(e), 'utf8'); } catch { continue; }
       if (bytes > MAX_EVENT_BYTES) continue;
-      if (run.events.length >= MAX_EVENTS_PER_RUN) break;
       const { type, at, runId: _r, ...payload } = e;
-      const ev = { seq: seq++, type: String(type), at: Number(at) || this.now(), payload };
-      run.events.push(ev);
+      // A STREAM IS NOT A FACT. A task's streamed text (`task.delta`) is folded into the record
+      // — the task's live text — and handed to the tail so the other client reads along, but it
+      // is never stored: the final text is on the record as a step. Deltas alone filled a run's
+      // event log in three minutes, and the store then dropped the task.done, the writer's
+      // start and the board that followed — a run that read "running" with a finished member.
+      const stream = String(type) === 'task.delta';
+      const ev = { seq: stream ? null : seq++, type: String(type), at: Number(at) || this.now(), payload };
+      // At the cap the RECORD still moves — the fold keeps status, tasks and the board true —
+      // only the replayable list stops growing, and says so.
+      if (!stream) { if (run.events.length < MAX_EVENTS_PER_RUN) run.events.push(ev); else { ev.seq = null; run.eventsTruncated = true; seq -= 1; } }
+      if (!stream) stored += 1;
       applyEvent(run, ev);
       // A finished task's fact goes to the member's scorecard — chained and attested there.
       if (this.scorecards && ev.type === 'task.scored') this.scorecards.fromRunEvent(ev, run);
@@ -139,7 +148,9 @@ export class TeamStore {
       if (this.engines && (ev.type === 'task.routed' || ev.type === 'task.reappointed' || ev.type === 'task.handoff' || ev.type === 'task.scored')) this.engines.fromRunEvent(ev, run);
       for (const fn of this.watchers.get(run.id) || []) { try { fn(ev); } catch { /* a dead watcher */ } }
     }
-    this.save();
+    // A batch of nothing but stream text does not rewrite the store — the live text is
+    // persisted with the next fact (a step, a finding, the task's end).
+    if (stored) this.save();
     return this._view(run);
   }
   get(id, opts) { const r = this.runs.get(String(id || '')); return r ? this._view(r, opts) : null; }

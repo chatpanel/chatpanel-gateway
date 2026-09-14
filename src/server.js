@@ -63,7 +63,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.99';
+export const VERSION = '0.6.100';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -1061,7 +1061,8 @@ export function createGateway(cfg = loadConfig()) {
           // duplicates are dropped by seq, so nothing lands in the gap.
           let last = Number.isFinite(after) ? after : -1;
           sendEv({ seq: -1, type: 'hello', at: Date.now(), payload: { run: teamStore.get(id), after: last } });
-          const off = teamStore.watch(id, (ev) => { if (ev.seq > last) { last = ev.seq; sendEv(ev); } });
+          // A stream event (a task's text delta) has no seq: it is never stored, so it is passed live and never replayed.
+          const off = teamStore.watch(id, (ev) => { if (ev.seq == null) sendEv(ev); else if (ev.seq > last) { last = ev.seq; sendEv(ev); } });
           for (const ev of teamStore.eventsSince(id, last)) { last = ev.seq; sendEv(ev); }
           const beat = setInterval(() => { try { res.write(': keep-alive\n\n'); } catch { /* closed */ } }, 25_000);
           res.on('close', () => { off(); clearInterval(beat); });

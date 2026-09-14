@@ -224,3 +224,32 @@ test('a task\'s transcript is on the record; a run whose client died is resumabl
   await tail.close();
   await fetch(`${base}/v1/teams/runs/${id}`, { method: 'DELETE', headers: H });
 });
+
+test('a stream is not a fact: task.delta folds into the record and reaches the tail but is never stored, and a record at the event cap keeps moving', () => {
+  const s = store();
+  s.create({ id: 'run_9', client: 'extension', team: 't' });
+  s.append('run_9', [{ type: 'run.started', at: 1 }, { type: 'plan.ready', at: 2, tasks: [{ id: 'a', role: 'r' }, { id: 'b', role: 'w', dependsOn: ['a'] }] }, { type: 'task.started', at: 3, taskId: 'a' }]);
+  const seen = [];
+  const off = s.watch('run_9', (ev) => seen.push([ev.type, ev.seq]));
+  s.append('run_9', Array.from({ length: 3000 }, (_, i) => ({ type: 'task.delta', at: 4 + i, taskId: 'a', role: 'r', delta: 'x', text: `text ${i}` })));
+  assert.equal(s.get('run_9', { events: true }).events.length, 3, 'no delta stored');
+  assert.equal(s.get('run_9').tasks[0].text, 'text 2999', 'the live text is on the record');
+  assert.equal(seen.length, 3000, 'every delta reached the tail');
+  assert.equal(seen[0][1], null, 'with no seq — never replayed');
+  // The task ends and the writer starts AFTER three thousand deltas: the record says so.
+  s.append('run_9', [{ type: 'task.done', at: 5000, taskId: 'a', status: 'ok' }, { type: 'task.started', at: 5001, taskId: 'b' }]);
+  assert.equal(s.get('run_9').tasks[0].status, 'ok');
+  assert.equal(s.get('run_9').tasks[1].status, 'running');
+  assert.deepEqual(s.eventsSince('run_9', 1).map((e) => e.type), ['task.started', 'task.done', 'task.started']);
+  off();
+  // At the cap the replayable list stops, the fold does not: the run still ends on the record.
+  const many = Array.from({ length: 2100 }, (_, i) => ({ type: 'task.step', at: 6000 + i, taskId: 'b', role: 'w', steps: [{ role: 'user', content: `s${i}` }] }));
+  s.append('run_9', many);
+  const v = s.get('run_9', { events: true });
+  assert.equal(v.events.length, 2000);
+  assert.equal(v.eventsTruncated, true);
+  assert.equal(v.tasks[1].transcript.length, 2100, 'every step folded');
+  s.append('run_9', [{ type: 'task.done', at: 9000, taskId: 'b', status: 'ok' }, { type: 'run.done', at: 9001, status: 'completed' }]);
+  assert.equal(s.get('run_9').status, 'completed');
+  assert.equal(s.get('run_9').tasks[1].status, 'ok');
+});
