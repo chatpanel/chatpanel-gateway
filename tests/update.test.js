@@ -4,7 +4,10 @@ import './isolate-store.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { startUpdate, updateJob, _resetUpdateJob, cmpVersions, downloadHostAllowed, checkForUpdate, updateStatus } from '../src/update.js';
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { startUpdate, updateJob, _resetUpdateJob, cmpVersions, downloadHostAllowed, checkForUpdate, updateStatus, npmPackageRoot } from '../src/update.js';
 import { createGateway, VERSION } from '../src/server.js';
 
 const tick = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -17,6 +20,17 @@ test('versions compare numerically and only ChatPanel release hosts may serve a 
   assert.equal(downloadHostAllowed('https://dl.chatpanel.net/gateway/macos-arm64'), true);
   assert.equal(downloadHostAllowed('http://dl.chatpanel.net/x'), false, 'https only');
   assert.equal(downloadHostAllowed('https://evil.example.com/chatpanel-gateway'), false);
+});
+
+test('the npm install is found through the bin symlink the service launches, not its literal path', () => {
+  const prefix = realpathSync(mkdtempSync(join(tmpdir(), 'cp-npm-'))); // macOS: /var is itself a link to /private/var
+  const pkg = join(prefix, 'lib', 'node_modules', '@chatpanel', 'gateway');
+  mkdirSync(join(pkg, 'bin'), { recursive: true }); mkdirSync(join(prefix, 'bin'), { recursive: true });
+  writeFileSync(join(pkg, 'bin', 'chatpanel-gateway.js'), '');
+  symlinkSync(join(pkg, 'bin', 'chatpanel-gateway.js'), join(prefix, 'bin', 'chatpanel-gateway'));
+  assert.equal(npmPackageRoot(join(prefix, 'bin', 'chatpanel-gateway')), pkg);
+  assert.equal(npmPackageRoot(join(pkg, 'bin', 'chatpanel-gateway.js')), pkg);
+  assert.equal(npmPackageRoot('/somewhere/checkout/bin/chatpanel-gateway.js'), '', 'a checkout is not an npm install');
 });
 
 test('the job: installing → restarting (the restart runs after the answer is out) → done when there is no service; a failure is a sentence; two at once is one', async () => {

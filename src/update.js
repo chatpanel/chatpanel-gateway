@@ -26,7 +26,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { chmod, rename, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { restartService, serviceRegistered } from './service.js';
 
 const PACKAGE = '@chatpanel/gateway';
@@ -99,10 +99,16 @@ async function fetchJson(url, timeoutMs = FETCH_TIMEOUT_MS) {
 
 // ── the npm install, as the service launches it ───────────────────────────────────────
 
-/** The package root of the running npm install (…/node_modules/@chatpanel/gateway), or ''. */
-function npmPackageRoot() {
-  const script = process.argv[1] ? path.resolve(process.argv[1]) : '';
-  const m = /^(.*[/\\]node_modules[/\\]@chatpanel[/\\]gateway)[/\\]/.exec(script);
+/**
+ * The package root of the running npm install (…/node_modules/@chatpanel/gateway), or ''.
+ * The service launches the bin SYMLINK (<prefix>/bin/chatpanel-gateway), whose own path says
+ * nothing — the realpath is what is inside node_modules. (Reading it literally classified a
+ * global install as "not npm" and hid the Update button behind the command.)
+ */
+export function npmPackageRoot(script = process.argv[1]) {
+  let real = script ? path.resolve(script) : '';
+  try { real = realpathSync(real); } catch { /* a dangling link is still a clue */ }
+  const m = /^(.*[/\\]node_modules[/\\]@chatpanel[/\\]gateway)[/\\]/.exec(real);
   return m ? m[1] : '';
 }
 /** The version the npm install on disk reports — what the NEXT start will run. */
@@ -151,12 +157,12 @@ export async function checkForUpdate(current, { force = false } = {}) {
   const mode = isCompiledBinary() ? 'binary' : 'npm';
   if (DISABLED) return { current, latest: null, updateAvailable: false, mode, canSelfUpdate: false, assetUrl: null, stale: false, error: '', npmCommand: null, channel: mode === 'npm' ? 'npm' : 'release', service: false, disabled: true };
   const want = assetName();
-  let latest = null; let assetUrl = null; let stale = false; let error = '';
+  let latest = null; let assetUrl = null; let stale = false; let error = ''; let checkedAt = 0;
   const cache = await readCache();
   const cacheFits = cache && cache.mode === mode;
-  const fallBack = () => { latest = cacheFits ? cache.latest || null : null; assetUrl = cacheFits ? cache.assetUrl || null : null; stale = true; };
+  const fallBack = () => { latest = cacheFits ? cache.latest || null : null; assetUrl = cacheFits ? cache.assetUrl || null : null; checkedAt = cacheFits ? cache.checkedAt || 0 : 0; stale = true; };
   if (!force && cacheFits && Date.now() - cache.checkedAt < CHECK_EVERY_MS) {
-    latest = cache.latest; assetUrl = cache.assetUrl;
+    latest = cache.latest; assetUrl = cache.assetUrl; checkedAt = cache.checkedAt;
   } else if (!force && lastFailure.at && Date.now() - lastFailure.at < RETRY_AFTER_FAILURE_MS) {
     error = lastFailure.error; fallBack();
   } else {
@@ -169,7 +175,8 @@ export async function checkForUpdate(current, { force = false } = {}) {
         latest = parseVersion(data.tag_name) || parseVersion(data.name);
         assetUrl = want ? (data.assets || []).find((a) => a.name === want)?.browser_download_url || null : null;
       }
-      await writeCache({ checkedAt: Date.now(), mode, latest, assetUrl });
+      checkedAt = Date.now();
+      await writeCache({ checkedAt, mode, latest, assetUrl });
       lastFailure = { at: 0, error: '' };
     } catch (e) {
       error = e.message; lastFailure = { at: Date.now(), error }; fallBack();
@@ -182,7 +189,9 @@ export async function checkForUpdate(current, { force = false } = {}) {
   const canSelfUpdate = mode === 'binary' ? !!assetUrl && (process.platform !== 'win32' || serviceRegistered())
     : !!npmPackageRoot() && (process.platform !== 'win32' || (serviceRegistered() && !!npmCli()));
   const npmCommand = mode === 'npm' ? (process.platform === 'win32' ? `chatpanel-gateway --stop; npm i -g ${PACKAGE}@latest; chatpanel-gateway --install` : `npm i -g ${PACKAGE}@latest`) : null;
-  return { current, latest, updateAvailable, mode, canSelfUpdate, assetUrl, stale, error, npmCommand, channel: mode === 'npm' ? 'npm' : 'release', service: serviceRegistered() };
+  // `checkedAt`: when `latest` was last a real answer — so a client can say "as of 3 h ago"
+  // instead of an unqualified "up to date" minutes after a publish.
+  return { current, latest, updateAvailable, mode, canSelfUpdate, assetUrl, stale, error, npmCommand, channel: mode === 'npm' ? 'npm' : 'release', service: serviceRegistered(), checkedAt };
 }
 
 /**
@@ -198,11 +207,11 @@ let inFlight = null;
 export function updateStatus(current) {
   const mode = isCompiledBinary() ? 'binary' : 'npm';
   if (DISABLED) return { current, latest: null, updateAvailable: false, mode, canSelfUpdate: false, stale: false, error: '', npmCommand: null, channel: mode === 'npm' ? 'npm' : 'release', service: false, disabled: true };
-  const due = !known || (known.stale ? !(lastFailure.at && Date.now() - lastFailure.at < RETRY_AFTER_FAILURE_MS) : Date.now() - known.checkedAt > CHECK_EVERY_MS);
+  const due = !known || (known.stale ? !(lastFailure.at && Date.now() - lastFailure.at < RETRY_AFTER_FAILURE_MS) : Date.now() - known.seenAt > CHECK_EVERY_MS);
   if (due && !inFlight) {
-    inFlight = checkForUpdate(current).then((r) => { known = { ...r, checkedAt: Date.now() }; }).catch(() => {}).finally(() => { inFlight = null; });
+    inFlight = checkForUpdate(current).then((r) => { known = { ...r, seenAt: Date.now() }; }).catch(() => {}).finally(() => { inFlight = null; });
   }
-  if (known) return { ...known, checkedAt: undefined, current };
+  if (known) return { ...known, seenAt: undefined, current };
   return { current, latest: null, updateAvailable: false, mode, canSelfUpdate: false, stale: true, checking: true, error: '', npmCommand: null, channel: mode === 'npm' ? 'npm' : 'release', service: serviceRegistered() };
 }
 /** Test seam. */
