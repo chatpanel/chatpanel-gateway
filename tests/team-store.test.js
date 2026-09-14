@@ -147,6 +147,8 @@ test('the board: threads and posts fold on the record; a person answers an ask f
   // The OTHER client answers.
   const bad = await fetch(`${base}/v1/teams/runs/${id}/answer`, { method: 'POST', headers: H, body: JSON.stringify({ threadId: 'th1', text: 'x' }) });
   assert.equal(bad.status, 400, 'only an ask thread takes an answer');
+  const held = await fetch(`${base}/v1/teams/runs/${id}/threads/ask1`, { method: 'DELETE', headers: H });
+  assert.equal(held.status, 400, 'a waiting ask cannot be removed from the board');
   const ans = await (await fetch(`${base}/v1/teams/runs/${id}/answer`, { method: 'POST', headers: H, body: JSON.stringify({ threadId: 'ask1', text: 'Feb 13–17', by: 'person' }) })).json();
   assert.equal(ans.ok, true, JSON.stringify(ans));
   const askThread = ans.run.threads.threads.find((t) => t.id === 'ask1');
@@ -167,6 +169,20 @@ test('the board: threads and posts fold on the record; a person answers an ask f
   assert.equal(dec.run.threads.posts.find((x) => x.id === 'p1').status, 'approved');
   const note = await (await fetch(`${base}/v1/teams/runs/${id}/post`, { method: 'POST', headers: H, body: JSON.stringify({ threadId: 'th1', text: 'use $160', replyTo: 'p1' }) })).json();
   assert.equal(note.run.threads.posts.at(-1).replyTo, 'p1');
+  // A thread removed from the board (0.6.106): it and its posts leave the record; the tail sees the event.
+  const rm = await (await fetch(`${base}/v1/teams/runs/${id}/threads/th1`, { method: 'DELETE', headers: H })).json();
+  assert.equal(rm.ok, true, JSON.stringify(rm));
+  assert.equal(rm.run.threads.threads.some((t) => t.id === 'th1'), false);
+  assert.equal(rm.run.threads.posts.some((x) => x.threadId === 'th1'), false);
+  assert.equal(rm.run.threads.threads.some((t) => t.id === 'ask1'), true, 'the other thread stays');
+  assert.equal(tail.got.at(-1).type, 'board.thread-removed');
+  assert.equal(tail.got.at(-1).payload.threadId, 'th1');
+  // A late echo of a post in the removed thread lands nowhere.
+  await (await fetch(`${base}/v1/teams/runs/${id}/events`, { method: 'POST', headers: H, body: JSON.stringify({ events: [{ type: 'board.post', at: 7, post: { id: 'p9', threadId: 'th1', by: 'researcher', kind: 'note', text: 'late', at: 7 } }] }) })).json();
+  const after = await (await fetch(`${base}/v1/teams/runs/${id}`, { headers: H })).json();
+  assert.equal(after.run.threads.posts.some((x) => x.id === 'p9'), false);
+  const missing = await fetch(`${base}/v1/teams/runs/${id}/threads/nope`, { method: 'DELETE', headers: H });
+  assert.equal(missing.status, 404);
   await tail.close();
   await fetch(`${base}/v1/teams/runs/${id}`, { method: 'DELETE', headers: H });
 });

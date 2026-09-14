@@ -63,7 +63,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.105';
+export const VERSION = '0.6.106';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -981,6 +981,7 @@ export function createGateway(cfg = loadConfig()) {
     //   POST /v1/teams/runs/:id/answer { threadId, text, by }  → { ok, run }  a person answers an ask (0.6.81)
     //   POST /v1/teams/runs/:id/decide { postId, status, by }  → { ok, run }  approve / reject a post
     //   POST /v1/teams/runs/:id/post { threadId, text, kind?, replyTo?, by } → { ok, run }
+    //   DELETE /v1/teams/runs/:id/threads/:threadId → { ok, run }  a person removes a thread from the board (0.6.106)
     //   POST /v1/teams/runs/:id/handoff { taskId, model, by, reason } → { ok, run }  continue a task on another model (0.6.85)
     //   GET  /v1/teams/runs/:id/checkpoint → { ok, checkpoint }  what resumeTeam needs, from the record
     //   POST /v1/teams/runs/:id/claim { client } → { ok, run }  a client takes a stopped/stale run over
@@ -998,7 +999,7 @@ export function createGateway(cfg = loadConfig()) {
       }
     }
     {
-      const m = /^\/v1\/teams\/runs\/([a-zA-Z0-9_-]{4,64})(\/events|\/stop|\/answer|\/decide|\/post|\/handoff|\/checkpoint|\/claim)?$/.exec(pathname);
+      const m = /^\/v1\/teams\/runs\/([a-zA-Z0-9_-]{4,64})(\/events|\/stop|\/answer|\/decide|\/post|\/handoff|\/checkpoint|\/claim|\/threads\/[a-zA-Z0-9_:-]{1,80})?$/.exec(pathname);
       if (m) {
         const id = m[1];
         const sub = m[2] || '';
@@ -1026,6 +1027,9 @@ export function createGateway(cfg = loadConfig()) {
           } catch (e) {
             return sendJson(res, e.message.startsWith('no ') ? 404 : 400, { error: { message: `team run: ${e.message}`, type: 'team_error' } });
           }
+        }
+        if (sub.startsWith('/threads/') && req.method === 'DELETE') {
+          try { return sendJson(res, 200, { ok: true, run: teamStore.removeThread(id, { threadId: sub.slice('/threads/'.length), by: 'person' }) }); } catch (e) { return sendJson(res, e.message.startsWith('no ') ? 404 : 400, { error: { message: `team run: ${e.message}`, type: 'team_error' } }); }
         }
         if ((sub === '/answer' || sub === '/decide' || sub === '/post') && req.method === 'POST') {
           try {

@@ -197,6 +197,19 @@ export class TeamStore {
     const post = { id: `pp_${randomBytes(4).toString('hex')}`, threadId, by: String(by || 'person').slice(0, 40), kind: ['note', 'question', 'decision'].includes(kind) ? kind : 'note', text: String(text || '').slice(0, 4000), refs: [], replyTo: replyTo || null, status: 'open', at };
     return this.append(id, [{ type: 'board.post', at, post }]);
   }
+  /**
+   * A person takes a thread off the board, from any client: the thread and its posts leave the
+   * record, and the running client's tail applies the same event to its live board. A waiting
+   * ask stays — the member behind it is blocked on an answer, not on tidiness.
+   */
+  removeThread(id, { threadId, by = 'person' } = {}) {
+    const run = this.runs.get(String(id || ''));
+    if (!run) throw new Error(`no run ${id}`);
+    const thread = (run.threads?.threads || []).find((t) => t.id === threadId);
+    if (!thread) throw new Error(`no thread ${threadId}`);
+    if (thread.kind === 'ask' && thread.status === 'waiting') throw new Error('an ask that is waiting cannot be removed — answer it, or stop the run');
+    return this.append(id, [{ type: 'board.thread-removed', at: this.now(), threadId, by: String(by || 'person').slice(0, 40) }]);
+  }
   /** The checkpoint a client resumes from — the runner's own when the run ended with one, else built from the record. */
   checkpoint(id) {
     const run = this.runs.get(String(id || ''));
