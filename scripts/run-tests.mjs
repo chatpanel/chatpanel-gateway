@@ -30,6 +30,10 @@ const child = spawn(process.execPath, ['--test', ...files], {
   env: {
     ...process.env,
     CHATPANEL_GATEWAY_CONFIG: join(dir, 'gateway.config.json'),
+    // No self-update from a test: no registry check on /status, and POST /update must never
+    // run `npm install -g` over the developer's (or CI's) real install.
+    CHATPANEL_SELF_UPDATE: 'off',
+    CHATPANEL_UPDATE_CACHE: join(dir, 'gateway-update-check.json'),
     CHATPANEL_HISTORY_DB: join(dir, 'history.db'),
     CHATPANEL_HISTORY_STORE: join(dir, 'history-store.enc'),
     CHATPANEL_HISTORY_KEY: join(dir, 'history-key'),

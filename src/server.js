@@ -40,6 +40,7 @@ import { createEngineLedgerStore } from './engine-ledger-store.js';
 import { createProjectStore } from './project-store.js';
 import { applicationsFor, recruitPass } from './recruiting.js';
 import { ensureBridge } from './bridge-supervisor.js';
+import { checkForUpdate, startUpdate, updateJob } from './update.js';
 import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackups } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
@@ -63,7 +64,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.106';
+export const VERSION = '0.6.107';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -698,8 +699,21 @@ export function createGateway(cfg = loadConfig()) {
     // logs (GET /logs). Unlike the /v1 data plane (open to any local client — the
     // product), these must not be reachable by a no-Origin local process or a drive-by
     // localhost web page. Require the extension Origin or the gateway token.
-    if ((pathname === '/config' || pathname === '/logs') && !isAdminAuthorized(req)) {
+    if ((pathname === '/config' || pathname === '/logs' || pathname === '/update') && !isAdminAuthorized(req)) {
       return sendJson(res, 403, { error: 'admin route: extension origin or gateway token required' });
+    }
+    // SELF-UPDATE (0.6.107) — src/update.js. Admin-gated: it installs software. Nothing in the
+    // request chooses WHAT is installed (the package and the release host are pinned), so the
+    // most a caller can do is move this gateway to its channel's latest.
+    //   GET  /update[?force=1] → { ok, update: { current, latest, updateAvailable, mode, canSelfUpdate, npmCommand, stale, error }, job }
+    //   POST /update           → 202 { ok, job }  starts it; watch GET /update, then /status until `version` moves
+    if (pathname === '/update' && req.method === 'GET') {
+      const update = await checkForUpdate(VERSION, { force: url.searchParams.get('force') === '1' }).catch((e) => ({ current: VERSION, updateAvailable: false, error: String(e?.message || e) }));
+      return sendJson(res, 200, { ok: true, update, job: updateJob() });
+    }
+    if (pathname === '/update' && req.method === 'POST') {
+      const job = startUpdate(VERSION);
+      return sendJson(res, job.already ? 409 : 202, { ok: true, job });
     }
     if ((pathname === '/v1/history/key' || pathname === '/v1/history/ingest-backup')
       && req.method === 'POST' && !isAdminAuthorized(req)) {
@@ -779,6 +793,10 @@ export function createGateway(cfg = loadConfig()) {
         detector: detectorStatus(cfg),
         pro: { unlocked: proUnlocked }, usage: usage(cfg),
         uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
+        // ADDITIVE (0.6.107): is there a newer gateway on this install's channel, and can this
+        // process apply it itself (POST /update)? Throttled to one network check per 6 h and
+        // never slower than its timeout; an older extension ignores the key.
+        update: await checkForUpdate(VERSION).catch(() => ({ current: VERSION, updateAvailable: false })),
       });
     }
     // --- WARM search tier. The extension pushes its DECRYPTED records to this LOCAL

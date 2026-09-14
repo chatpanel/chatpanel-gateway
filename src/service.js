@@ -10,7 +10,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
 
 const LABEL = 'net.chatpanel.gateway';
 const DISPLAY = 'ChatPanel Privacy Gateway';
@@ -163,6 +163,43 @@ function byPlatform(mac, win, lin) {
   if (process.platform === 'linux') return lin();
   throw new Error(`Auto-start isn't supported on ${process.platform} yet — run the gateway directly.`);
 }
+
+/**
+ * Relaunch the registered service into whatever is now installed (src/update.js). Returns
+ * `false` when this gateway is not run by a service it can restart — the caller then says
+ * "installed; start it again yourself" rather than exiting into nothing.
+ *
+ * macOS / Linux: the service manager stops this process and starts the new one. Windows has
+ * no supervisor: a detached helper waits for THIS process to exit (freeing the port and the
+ * onnxruntime DLL npm cannot overwrite while it is loaded), optionally runs the npm install
+ * that had to wait for that, relaunches through the registered VBS, and cleans up a renamed
+ * .exe. The caller exits after spawning it.
+ */
+export function restartService({ winInstall: winInstallCmd = '' } = {}) {
+  try {
+    if (process.platform === 'darwin') {
+      if (!existsSync(macPlist())) return false;
+      spawn('launchctl', ['kickstart', '-k', `gui/${process.getuid?.() ?? 0}/${LABEL}`], { detached: true, stdio: 'ignore' }).unref();
+      return true;
+    }
+    if (process.platform === 'linux') {
+      if (!existsSync(linUnit())) return false;
+      spawn('systemctl', ['--user', 'restart', 'chatpanel-gateway'], { detached: true, stdio: 'ignore' }).unref();
+      return true;
+    }
+    if (process.platform === 'win32') {
+      const vbs = winVbs();
+      if (!existsSync(vbs)) return false;
+      const dir = path.dirname(process.execPath);
+      const cmd = `timeout /t 3 >nul & ${winInstallCmd ? `${winInstallCmd} & ` : ''}wscript.exe "${vbs}" & del /q "${path.join(dir, 'chatpanel-gateway.old-*.exe')}" >nul 2>&1`;
+      spawn('cmd', ['/c', cmd], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+      setTimeout(() => process.exit(0), 300);
+      return true;
+    }
+  } catch { /* fall through */ }
+  return false;
+}
+export function serviceRegistered() { try { return byPlatform(() => existsSync(macPlist()), () => existsSync(winVbs()), () => existsSync(linUnit())); } catch { return false; } }
 
 export function installService() { return byPlatform(macInstall, winInstall, linInstall); }
 export function uninstallService() { return byPlatform(macUninstall, winUninstall, linUninstall); }

@@ -175,6 +175,7 @@ test('the board: threads and posts fold on the record; a person answers an ask f
   assert.equal(rm.run.threads.threads.some((t) => t.id === 'th1'), false);
   assert.equal(rm.run.threads.posts.some((x) => x.threadId === 'th1'), false);
   assert.equal(rm.run.threads.threads.some((t) => t.id === 'ask1'), true, 'the other thread stays');
+  for (let i = 0; i < 80 && tail.got.at(-1)?.type !== 'board.thread-removed'; i += 1) await new Promise((r) => setTimeout(r, 25));
   assert.equal(tail.got.at(-1).type, 'board.thread-removed');
   assert.equal(tail.got.at(-1).payload.threadId, 'th1');
   // A late echo of a post in the removed thread lands nowhere.
