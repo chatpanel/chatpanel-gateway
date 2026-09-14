@@ -4,7 +4,7 @@ import './isolate-store.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { startUpdate, updateJob, _resetUpdateJob, cmpVersions, downloadHostAllowed, checkForUpdate } from '../src/update.js';
+import { startUpdate, updateJob, _resetUpdateJob, cmpVersions, downloadHostAllowed, checkForUpdate, updateStatus } from '../src/update.js';
 import { createGateway, VERSION } from '../src/server.js';
 
 const tick = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -46,6 +46,14 @@ test('with self-update off (the test runner) the check makes no network call and
   assert.equal(u.disabled, true);
   assert.equal(u.updateAvailable, false);
   assert.equal(u.canSelfUpdate, false);
+});
+
+test('/status never waits: updateStatus answers at once from what is known', async () => {
+  const t0 = Date.now();
+  const u = updateStatus(VERSION);
+  assert.ok(Date.now() - t0 < 50);
+  assert.equal(u.current, VERSION);
+  assert.equal(u.updateAvailable, false);
 });
 
 test('the routes: /status carries `update`; GET and POST /update need the extension origin or the token; POST starts a job', async () => {

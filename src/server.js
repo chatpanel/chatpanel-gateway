@@ -40,7 +40,7 @@ import { createEngineLedgerStore } from './engine-ledger-store.js';
 import { createProjectStore } from './project-store.js';
 import { applicationsFor, recruitPass } from './recruiting.js';
 import { ensureBridge } from './bridge-supervisor.js';
-import { checkForUpdate, startUpdate, updateJob } from './update.js';
+import { checkForUpdate, updateStatus, startUpdate, updateJob } from './update.js';
 import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackups } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
@@ -64,7 +64,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.107';
+export const VERSION = '0.6.108';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -794,9 +794,10 @@ export function createGateway(cfg = loadConfig()) {
         pro: { unlocked: proUnlocked }, usage: usage(cfg),
         uptimeSeconds: Math.floor((Date.now() - STARTED_AT) / 1000),
         // ADDITIVE (0.6.107): is there a newer gateway on this install's channel, and can this
-        // process apply it itself (POST /update)? Throttled to one network check per 6 h and
-        // never slower than its timeout; an older extension ignores the key.
-        update: await checkForUpdate(VERSION).catch(() => ({ current: VERSION, updateAvailable: false })),
+        // process apply it itself (POST /update)? Answered from the last check, refreshed in
+        // the background (0.6.108) — /status never waits on the network; an older extension
+        // ignores the key.
+        update: updateStatus(VERSION),
       });
     }
     // --- WARM search tier. The extension pushes its DECRYPTED records to this LOCAL

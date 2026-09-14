@@ -185,6 +185,29 @@ export async function checkForUpdate(current, { force = false } = {}) {
   return { current, latest, updateAvailable, mode, canSelfUpdate, assetUrl, stale, error, npmCommand, channel: mode === 'npm' ? 'npm' : 'release', service: serviceRegistered() };
 }
 
+/**
+ * What /status reports — NEVER waits on the network. The answer is the last check (in
+ * memory, else the disk cache — `stale: true` until a fresh one lands), and a fresh check is
+ * kicked off in the background when one is due. The first /status after a start therefore
+ * says "unknown yet"; the next says what the registry said. A /status that waited on a 5 s
+ * fetch behind a VPN missed the extension's 4 s deadline and drew "Not installed" for a
+ * gateway that was running.
+ */
+let known = null;
+let inFlight = null;
+export function updateStatus(current) {
+  const mode = isCompiledBinary() ? 'binary' : 'npm';
+  if (DISABLED) return { current, latest: null, updateAvailable: false, mode, canSelfUpdate: false, stale: false, error: '', npmCommand: null, channel: mode === 'npm' ? 'npm' : 'release', service: false, disabled: true };
+  const due = !known || (known.stale ? !(lastFailure.at && Date.now() - lastFailure.at < RETRY_AFTER_FAILURE_MS) : Date.now() - known.checkedAt > CHECK_EVERY_MS);
+  if (due && !inFlight) {
+    inFlight = checkForUpdate(current).then((r) => { known = { ...r, checkedAt: Date.now() }; }).catch(() => {}).finally(() => { inFlight = null; });
+  }
+  if (known) return { ...known, checkedAt: undefined, current };
+  return { current, latest: null, updateAvailable: false, mode, canSelfUpdate: false, stale: true, checking: true, error: '', npmCommand: null, channel: mode === 'npm' ? 'npm' : 'release', service: serviceRegistered() };
+}
+/** Test seam. */
+export function _resetUpdateStatus() { known = null; inFlight = null; }
+
 // ── apply ───────────────────────────────────────────────────────────────────────────
 
 async function swapBinary(info) {
