@@ -1,6 +1,8 @@
-# ChatPanel Privacy Gateway installer (Windows) - no Node.js required.
+# ChatPanel Gateway installer (Windows) - THE one thing to install; no Node.js required.
+# The gateway carries the bridge and starts it itself, so local coding agents (Claude Code,
+# Codex, ...) work without a second installer.
 #
-#   irm https://dl.chatpanel.net/gateway/install.ps1 | iex
+#   irm https://dl.chatpanel.net/install.ps1 | iex
 #
 # Note: no `$ErrorActionPreference = 'Stop'` here, because native tools write
 # progress/notices to stderr and that would be treated as fatal. We check exit
@@ -13,7 +15,7 @@ $bin = Join-Path $dir 'chatpanel-gateway.exe'
 $tmp = "$bin.new"
 
 Write-Host ""
-Write-Host "Installing ChatPanel Privacy Gateway" -ForegroundColor Cyan
+Write-Host "Installing ChatPanel Gateway (bridge included)" -ForegroundColor Cyan
 
 # Stop any running gateway for a clean in-place upgrade.
 Get-Process -Name 'chatpanel-gateway' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -43,7 +45,7 @@ $installed = ($LASTEXITCODE -eq 0)
 
 Write-Host ""
 if ($installed) {
-  Write-Host "Done. The ChatPanel Privacy Gateway is running on http://127.0.0.1:4320 and starts at login." -ForegroundColor Green
+  Write-Host "Done. ChatPanel Gateway is running on http://127.0.0.1:4320 and starts at login - with the bridge for your local coding agents on :4319. Nothing else to install." -ForegroundColor Green
   Write-Host "First run downloads the redaction model (~100 MB, one-time) - name/org detection turns on once it's ready."
 } else {
   Write-Host "Installed, but auto-start setup hit an issue. Start it manually with:" -ForegroundColor Yellow
