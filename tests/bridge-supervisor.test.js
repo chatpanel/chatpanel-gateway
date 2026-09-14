@@ -90,3 +90,35 @@ test('ensureBridge: a newer standalone is preferred over the embedded copy; supe
   const remote = await ensureBridge({ bridge: { url: 'http://192.168.1.9:4319' } }, { log: () => {}, probe: async () => null, spawnImpl: () => { throw new Error('must not spawn'); }, version: () => '0.11.20', candidates: [], waitForSiblingMs: 0 });
   assert.equal(remote.status().mode, 'off'); assert.match(remote.status().why, /not on this machine/);
 });
+
+test('ensureBridge: an adopted bridge is watched — when it goes away, the embedded one starts in its place; stop() ends the watch', async () => {
+  const log = []; const spawns = [];
+  let there = { version: '0.11.21', managedBy: 'desktop-child' };
+  const ticks = [];
+  let runTick = null;
+  const c = await ensureBridge({ bridge: { url: 'http://127.0.0.1:4319' } }, {
+    log: (l) => log.push(l), probe: async () => there,
+    spawnImpl: (program, args, opts) => { spawns.push({ program, args, env: opts.env }); return fakeChild(); },
+    version: () => '0.11.23', candidates: [], launch: () => ({ program: 'g', args: ['--bridge'] }),
+    waitForSiblingMs: 0, setTimer: (fn) => fn(),
+    setWatch: (fn, ms) => { ticks.push(ms); runTick = fn; return 1; },
+  });
+  assert.equal(c.status().mode, 'adopted'); assert.equal(c.status().version, '0.11.21');
+  assert.equal(spawns.length, 0);
+  assert.deepEqual(ticks, [10000], 'a watch was armed');
+  await runTick(); assert.equal(c.status().mode, 'adopted', 'still there');
+  // The desktop quit: its child bridge is gone. One miss is patience; the second starts ours.
+  there = null;
+  await runTick(); assert.equal(c.status().mode, 'adopted'); assert.equal(spawns.length, 0);
+  assert.equal(ticks.at(-1), 3000, 'a miss re-probes sooner');
+  await runTick();
+  assert.equal(c.status().mode, 'embedded'); assert.equal(c.status().version, '0.11.23');
+  assert.equal(spawns.length, 1); assert.deepEqual(spawns[0].args, ['--bridge']); assert.equal(spawns[0].env.CHATPANEL_MANAGED_BY, 'gateway');
+  assert.ok(log.some((l) => /adopted bridge .* went away — starting the embedded bridge \(v0\.11\.23\)/.test(l)), log.join('\n'));
+  // Nothing to run in its place: off, said plainly.
+  let t2 = { version: '0.11.1' };
+  let tick2 = null;
+  const d = await ensureBridge({ bridge: { url: 'http://127.0.0.1:4319' } }, { log: () => {}, probe: async () => t2, spawnImpl: () => { throw new Error('must not spawn'); }, version: () => null, candidates: [], launch: () => ({ program: 'g', args: ['--bridge'] }), waitForSiblingMs: 0, setWatch: (fn) => { tick2 = fn; return 1; } });
+  t2 = null; await tick2(); await tick2();
+  assert.equal(d.status().mode, 'off'); assert.match(d.status().why, /went away and no bridge to start/);
+});

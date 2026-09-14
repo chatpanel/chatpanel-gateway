@@ -112,6 +112,10 @@ export async function ensureBridge(cfg, {
   waitForSiblingMs = 2500,
   now = Date.now,
   setTimer = setTimeout,
+  // The watch on an ADOPTED bridge: its own timer seam (a test's immediate `setTimer` would
+  // spin it), unref'd so a pending watch never keeps the process alive.
+  setWatch = (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return t; },
+  watchEveryMs = 10_000,
 } = {}) {
   const url = String(cfg?.bridge?.url || DEFAULT_BRIDGE_URL).replace(/\/$/, '');
   const state = { mode: 'off', version: null, pid: null, restarts: 0, why: '', child: null, stopping: false, backoff: 0 };
@@ -131,12 +135,43 @@ export async function ensureBridge(cfg, {
   const plan = planBridge({ managed, cfgUrl: url, healthy, standalone, embeddedVersion });
 
   if (plan.action === 'off') { settle('off', plan.why); return controller(); }
-  if (plan.action === 'adopt') { settle('adopted', plan.why, { version: healthy.version }); return controller(); }
 
-  const spec = plan.action === 'spawn-embedded'
-    ? { ...emb, env: { CHATPANEL_BRIDGE_EMBEDDED: '1' }, mode: 'embedded', version: embeddedVersion }
-    : { program: plan.path, args: [], env: {}, mode: 'standalone', version: standalone?.version || null };
+  // What WE would run, decided once and kept: an adopted bridge that goes away is replaced
+  // by this without re-planning from scratch.
+  const specFor = (p) => (p.action === 'spawn-embedded'
+    ? { ...emb, env: { CHATPANEL_BRIDGE_EMBEDDED: '1' }, mode: 'embedded', version: p.version || embeddedVersion }
+    : { program: p.path, args: [], env: {}, mode: 'standalone', version: standalone?.version || null });
+  let spec = plan.action === 'adopt' ? null : specFor(plan);
   let startedAt = 0;
+  let watch = null;
+  let misses = 0;
+
+  // AN ADOPTED BRIDGE IS WATCHED, NOT TRUSTED FOREVER. The gateway carries the bridge: when
+  // the one it adopted goes away — the desktop app that ran it quit, an old login unit was
+  // removed, a standalone was stopped — the port is quiet and every agent turn fails with
+  // "bridge unreachable" until someone restarts the gateway. Two missed probes (a refused
+  // port counts at once) and ours starts.
+  const adopt = (why, ver) => {
+    settle('adopted', why, { version: ver || null });
+    misses = 0;
+    const tick = async () => {
+      if (state.stopping || state.mode !== 'adopted') return;
+      const h = await probe(url);
+      if (h) { misses = 0; state.version = h.version || state.version; watch = setWatch(tick, watchEveryMs); return; }
+      misses += 1;
+      if (misses < 2) { watch = setWatch(tick, Math.min(watchEveryMs, 3000)); return; }
+      if (!spec) {
+        const ev = embeddedVersion || version(emb.program, emb.args);
+        const p = planBridge({ managed, cfgUrl: url, healthy: null, standalone, embeddedVersion: ev });
+        if (p.action === 'off') { settle('off', `the adopted bridge went away and ${p.why}`); return; }
+        spec = specFor({ ...p, version: ev });
+      }
+      log(`  bridge   : the adopted bridge at ${url} went away — ${spec.mode === 'embedded' ? `starting the embedded bridge (v${spec.version || '?'})` : `starting the installed bridge (v${spec.version || '?'})`}`);
+      settle(spec.mode, `the adopted bridge went away; ${spec.mode} bridge started in its place`, { version: spec.version });
+      start();
+    };
+    watch = setWatch(tick, watchEveryMs);
+  };
 
   const start = () => {
     if (state.stopping) return;
@@ -155,7 +190,7 @@ export async function ensureBridge(cfg, {
       // The port may have been taken by a bridge someone else started while ours came up —
       // that is not a failure to restart from, it is a bridge to adopt.
       const other = await probe(url);
-      if (other) { settle('adopted', `a bridge already answers at ${url} (v${other.version || '?'}) — ours stepped aside`, { version: other.version }); return; }
+      if (other) { adopt(`a bridge already answers at ${url} (v${other.version || '?'}${other.managedBy ? `, run by ${other.managedBy}` : ''}) — ours stepped aside`, other.version); return; }
       if (now() - startedAt > STABLE_MS) state.backoff = 0;
       const delay = BACKOFF_MS[Math.min(state.backoff, BACKOFF_MS.length - 1)];
       state.backoff += 1; state.restarts += 1;
@@ -163,6 +198,7 @@ export async function ensureBridge(cfg, {
       setTimer(start, delay);
     });
   };
+  if (plan.action === 'adopt') { adopt(plan.why, healthy.version); return controller(); }
   settle(spec.mode, plan.why, { version: spec.version });
   start();
   return controller();
@@ -170,7 +206,7 @@ export async function ensureBridge(cfg, {
   function controller() {
     return {
       status: () => ({ mode: state.mode, version: state.version, pid: state.pid, restarts: state.restarts, why: state.why }),
-      stop: () => { state.stopping = true; if (state.child && !state.child.killed) { try { state.child.kill('SIGTERM'); } catch { /* gone */ } } },
+      stop: () => { state.stopping = true; if (watch) { clearTimeout(watch); watch = null; } if (state.child && !state.child.killed) { try { state.child.kill('SIGTERM'); } catch { /* gone */ } } },
     };
   }
 }
