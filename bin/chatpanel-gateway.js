@@ -10,6 +10,7 @@
 //   chatpanel-gateway connect      point your CLI agents (Codex, Claude Code, …) at this server
 //   chatpanel-gateway --install    register login auto-start + start now
 //   chatpanel-gateway --uninstall  remove login auto-start
+//   chatpanel-gateway --stop       stop the running gateway (before an npm update on Windows)
 //   chatpanel-gateway --status     is auto-start registered?
 //   chatpanel-gateway --version    print version
 //   chatpanel-gateway --bridge     run the embedded bridge (the supervisor's child; not for hands)
@@ -49,8 +50,14 @@ try {
     process.stdout.write(formatConnect(connectAgents({ dryRun }), { dryRun }));
   } else {
     const { start, VERSION } = await import('../src/server.js');
-    const { installService, uninstallService, serviceStatus } = await import('../src/service.js');
+    const { installService, uninstallService, serviceStatus, stopService } = await import('../src/service.js');
     switch (arg) {
+      case '--stop':
+        // Before `npm i -g` on Windows: a running gateway holds onnxruntime's DLL, and npm's
+        // copy of the new one fails with EBUSY. Stop, install, `--install`.
+        stopService();
+        console.log('ChatPanel Gateway: stopped (auto-start is still registered; `--install` or a login starts it again).');
+        break;
       case '--version':
       case '-v':
         console.log(VERSION);
@@ -70,7 +77,7 @@ try {
         start();
         break;
       default:
-        console.error(`unknown option: ${arg}\nUsage: chatpanel-gateway [mcp|tools list|tools schema <tool>|call <tool> '<json>'|local|connect|--install|--uninstall|--status|--version|--bridge]`);
+        console.error(`unknown option: ${arg}\nUsage: chatpanel-gateway [mcp|tools list|tools schema <tool>|call <tool> '<json>'|local|connect|--install|--uninstall|--stop|--status|--version|--bridge]`);
         process.exit(2);
     }
   }

@@ -62,7 +62,10 @@ chatpanel-gateway
 
 On Windows, if `chatpanel-gateway` is "not recognized" right after `npm i -g`, npm's global bin
 folder is not on that shell's PATH yet: open a new PowerShell, or run it by path —
-`node "$(npm root -g)/@chatpanel/gateway/bin/chatpanel-gateway.js" --install`. npm may also warn
+`node "$(npm root -g)/@chatpanel/gateway/bin/chatpanel-gateway.js" --install`. **Updating on
+Windows:** stop the running gateway first, or npm fails with `EBUSY` on `onnxruntime_binding.node`
+(a loaded DLL cannot be overwritten) —
+`chatpanel-gateway --stop; npm i -g @chatpanel/gateway; chatpanel-gateway --install`. npm may also warn
 that `boolean@3.2.0` is deprecated and that `onnxruntime-node` / `sharp` / `protobufjs` run install
 scripts: all three come through `@huggingface/transformers` (the native model runtime) and are
 expected.

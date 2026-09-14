@@ -94,6 +94,14 @@ function winStopRunning() {
   run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { timeout: 15000 });
   run('taskkill', ['/IM', 'chatpanel-gateway.exe', '/F']); // belt and braces for the exe
 }
+/** Stop the running gateway (and its bridge child) on any platform — what an update needs first. */
+export function stopService() {
+  if (process.platform === 'win32') return winStopRunning();
+  if (process.platform === 'darwin') { run('launchctl', ['bootout', `gui/${process.getuid?.() ?? ''}/${LABEL}`]); }
+  else run('systemctl', ['--user', 'stop', 'chatpanel-gateway.service']);
+  run('pkill', ['-f', 'chatpanel-gateway']);
+  return undefined;
+}
 function winInstall() {
   const { program, args } = resolveLaunch();
   const parts = [program, ...args].map((p) => `""${p}""`).join(' ');

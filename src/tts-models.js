@@ -96,7 +96,7 @@ export const TTS_MODEL_CATALOG = [
     recommended: true,
     // Raw onnxruntime, which the standalone binary cannot provide.
     requiresNative: true,
-    note: 'Kyutai Pocket TTS (MIT code, CC-BY-4.0 weights). Eight built-in voices, and it can clone yours. Fastest model here. 146 MB, plus 52 MB if you want the built-in voices. Needs the npm gateway.',
+    note: 'Kyutai Pocket TTS (MIT code, CC-BY-4.0 weights). Eight built-in voices (downloaded with the model), and it can clone yours. Fastest model here. ~200 MB. Needs the npm gateway.',
   },
   {
     id: 'Xenova/speecht5_tts',
