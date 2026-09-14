@@ -14,6 +14,7 @@
 //   chatpanel-gateway --status     is auto-start registered?
 //   chatpanel-gateway --version    print version
 //   chatpanel-gateway --bridge     run the embedded bridge (the supervisor's child; not for hands)
+//   chatpanel-gateway --mcp-stdio <url>  the embedded bridge's per-turn tool proxy (spawned by CLI agents; not for hands)
 //
 // Config comes from gateway.config.json / env (see src/config.js).
 export {}; // mark as an ES module (all imports below are dynamic)
@@ -29,6 +30,16 @@ try {
     // execPath is the gateway, so it never self-updates over it.
     process.env.CHATPANEL_BRIDGE_EMBEDDED = '1';
     process.argv.splice(2, 1);
+    await import('@chatpanel/bridge/src/server.js');
+  } else if (arg === '--mcp-stdio') {
+    // THE EMBEDDED BRIDGE'S PER-TURN TOOL SERVER. The bridge hands every CLI agent (Claude
+    // Code, Codex, a custom CLI) its per-turn ChatPanel tools — `team`, page, notes — as a
+    // stdio MCP server whose command is "re-run me with --mcp-stdio <url>"; embedded, "me"
+    // is this bin. Refusing the flag made the proxy exit 2 and Claude Code report the
+    // ChatPanel tools as "Connection closed" — a saved team ran as one agent doing a web
+    // search. Bridge 0.11.22+ sends `--bridge --mcp-stdio`; this keeps the older embedded
+    // copy working too. Not the history `mcp` server above — that one proxies to the gateway.
+    process.env.CHATPANEL_BRIDGE_EMBEDDED = '1';
     await import('@chatpanel/bridge/src/server.js');
   } else if (arg === 'mcp') {
     // Its own path: proxies to the running gateway over HTTP and must NOT import
