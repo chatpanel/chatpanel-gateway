@@ -37,14 +37,19 @@ The redaction engine is the **same code** the ChatPanel extension runs — the
 [`@chatpanel/pii`](https://github.com/chatpanel/chatpanel-pii) package is the
 single source of truth, so a privacy feature added once is shared everywhere.
 
-## Quick start (bridge backend)
+## Quick start — the one thing to install
 
-You need the [ChatPanel bridge](https://github.com/chatpanel/chatpanel-bridge)
-running and logged into codex/claude (the same bridge the extension uses).
+The gateway **carries the [bridge](https://github.com/chatpanel/chatpanel-bridge)**
+(0.6.92+): `@chatpanel/bridge` is a dependency, bundled into the same binary, and the
+gateway starts it as a child process when nothing already answers on 4319 — or adopts a
+bridge that is already running (the desktop app's, or a standalone you installed; a newer
+standalone is preferred so bridge fixes keep their own cadence). Two processes on purpose:
+the bridge spawns your CLIs and holds SCM tokens; the model runtimes live here. Log into
+the CLIs (`claude`, `codex`, …) as you normally would — that is all.
 
 ```bash
 # Standalone binary — no Node.js required:
-curl -fsSL https://dl.chatpanel.net/gateway/install.sh | bash   # macOS / Linux
+curl -fsSL https://dl.chatpanel.net/install.sh | bash   # macOS / Linux
 #   Windows (PowerShell):  irm https://dl.chatpanel.net/gateway/install.ps1 | iex
 
 # Or via npm (needs Node):
@@ -52,7 +57,14 @@ npm install -g @chatpanel/gateway
 chatpanel-gateway
 # → ChatPanel Privacy Gateway on http://127.0.0.1:4320
 #     backend  : bridge (agent: codex, via http://127.0.0.1:4319)
+#     bridge   : starting the embedded bridge (v0.11.20)
 ```
+
+`GET /health` says which bridge it runs: `bridge.mode` is `embedded`, `standalone`,
+`adopted` or `off`. `CHATPANEL_BRIDGE_MANAGED=off` (or `bridge.managed: false`) turns the
+supervision off for a host that runs its own bridge — the desktop app does. A
+`bridge.url` that is not on this machine is left alone: nothing is started for a remote
+bridge.
 
 > **Binary vs. npm — same features, very different local-AI speed.** Both run
 > identical redaction/routing. But the standalone binary runs the local models

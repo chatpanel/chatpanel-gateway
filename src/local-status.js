@@ -101,5 +101,5 @@ export async function bridgePresenceNote(brOverride) {
     const n = (br.data.skills?.count ?? null);
     return `bridge detected at ${url} (v${br.data.version}${n != null ? `, ${n} skills` : ''}) — its agents and skills are available through this gateway.`;
   }
-  return `bridge not detected at ${url} — local agents/skills are unavailable until it runs (curl -fsSL https://dl.chatpanel.net/bridge/install.sh | bash). The gateway runs fine without it.`;
+  return `bridge not detected at ${url} — a running gateway (0.6.92+) starts its embedded bridge itself; if this one did not, check ~/.chatpanel/gateway.log. The gateway runs fine without it, minus local agents/skills.`;
 }

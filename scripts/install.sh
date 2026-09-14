@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# ChatPanel Privacy Gateway installer — downloads the standalone binary for your
-# OS and sets it to start at login. No Node.js required.
+# ChatPanel Gateway installer — THE one thing to install. Downloads the standalone
+# binary for your OS and sets it to start at login. No Node.js required.
 #
-#   curl -fsSL https://raw.githubusercontent.com/chatpanel/chatpanel-gateway/main/scripts/install.sh | bash
+#   curl -fsSL https://dl.chatpanel.net/install.sh | bash
+#
+# The gateway carries the bridge: it starts the embedded bridge itself (or adopts one
+# already running — the desktop app's, or a standalone you installed), so local coding
+# agents (Claude Code, Codex, …) work without a second installer. Log into those CLIs
+# as you normally would.
 #
 # Downloading via curl means the file is NOT quarantined, so macOS won't show the
 # "damaged / unidentified developer" prompt that browser downloads trigger.
-#
-# Needs the ChatPanel Bridge running + logged into codex/claude (backend: bridge).
 set -euo pipefail
 
 os="$(uname -s)"
@@ -31,7 +34,7 @@ mkdir -p "$dest"
 tmp="$(mktemp "${dest}/.chatpanel-gateway.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 
-echo "Downloading ChatPanel Privacy Gateway (~60-95 MB)..."
+echo "Downloading ChatPanel Gateway (~80-100 MB, bridge included)..."
 curl -fL --progress-bar "$url" -o "$tmp"
 chmod +x "$tmp"
 xattr -c "$tmp" 2>/dev/null || true
@@ -46,7 +49,9 @@ trap - EXIT
 echo "Installed to ${bin}"
 "$bin" --install
 echo
-echo "ChatPanel Privacy Gateway is running and will start at login."
+echo "ChatPanel Gateway is running and will start at login — with the bridge for local"
+echo "coding agents (Claude Code, Codex, …) started alongside it. Nothing else to install."
+echo "The extension and the desktop app find it at http://127.0.0.1:4320."
 echo "Point OpenCode / Pi at  http://127.0.0.1:4320/v1  (model: codex or claude)."
 
 case ":${PATH}:" in

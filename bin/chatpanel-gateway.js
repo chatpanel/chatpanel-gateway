@@ -12,6 +12,7 @@
 //   chatpanel-gateway --uninstall  remove login auto-start
 //   chatpanel-gateway --status     is auto-start registered?
 //   chatpanel-gateway --version    print version
+//   chatpanel-gateway --bridge     run the embedded bridge (the supervisor's child; not for hands)
 //
 // Config comes from gateway.config.json / env (see src/config.js).
 export {}; // mark as an ES module (all imports below are dynamic)
@@ -19,7 +20,16 @@ export {}; // mark as an ES module (all imports below are dynamic)
 const arg = process.argv[2];
 
 try {
-  if (arg === 'mcp') {
+  if (arg === '--bridge') {
+    // THE EMBEDDED BRIDGE. The gateway carries @chatpanel/bridge and starts it as a child of
+    // itself (src/bridge-supervisor.js) when nothing answers on 4319 — one install, two
+    // processes. The flag is consumed here; what remains of argv is the bridge's own
+    // (`--version` for the supervisor's check). CHATPANEL_BRIDGE_EMBEDDED tells the bridge its
+    // execPath is the gateway, so it never self-updates over it.
+    process.env.CHATPANEL_BRIDGE_EMBEDDED = '1';
+    process.argv.splice(2, 1);
+    await import('@chatpanel/bridge/src/server.js');
+  } else if (arg === 'mcp') {
     // Its own path: proxies to the running gateway over HTTP and must NOT import
     // server.js (which would open a second handle on the warm SQLite store).
     const { runMcpServer } = await import('../src/mcp.js');
@@ -60,7 +70,7 @@ try {
         start();
         break;
       default:
-        console.error(`unknown option: ${arg}\nUsage: chatpanel-gateway [mcp|tools list|tools schema <tool>|call <tool> '<json>'|local|connect|--install|--uninstall|--status|--version]`);
+        console.error(`unknown option: ${arg}\nUsage: chatpanel-gateway [mcp|tools list|tools schema <tool>|call <tool> '<json>'|local|connect|--install|--uninstall|--status|--version|--bridge]`);
         process.exit(2);
     }
   }

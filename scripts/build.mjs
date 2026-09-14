@@ -57,6 +57,11 @@ for (const [target, out] of targets) {
     entrypoints: [ENTRY],
     target: 'bun',
     plugins: [aliasNativeDeps],
+    // The embedded bridge (@chatpanel/bridge, bundled — it has no dependencies) imports the
+    // Claude Agent SDK optionally; the bridge's own binary marks it external for the same
+    // reason: inside a compiled binary the dynamic import resolves to null and the bridge
+    // drives the native `claude` CLI instead.
+    external: ['@anthropic-ai/claude-agent-sdk'],
     compile: { target, outfile: path.join(ROOT, 'dist', out) },
   });
   if (!result.success) {

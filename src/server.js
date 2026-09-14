@@ -39,6 +39,7 @@ import { createScorecardStore } from './scorecard-store.js';
 import { createEngineLedgerStore } from './engine-ledger-store.js';
 import { createProjectStore } from './project-store.js';
 import { applicationsFor, recruitPass } from './recruiting.js';
+import { ensureBridge } from './bridge-supervisor.js';
 import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackups } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
@@ -62,7 +63,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.91';
+export const VERSION = '0.6.92';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -745,6 +746,10 @@ export function createGateway(cfg = loadConfig()) {
         // on the login service it registers, so a client can say "provided by the desktop app"
         // and stop offering install.sh for a gateway that is already installed. Absent otherwise.
         ...(process.env.CHATPANEL_MANAGED_BY ? { managedBy: String(process.env.CHATPANEL_MANAGED_BY).slice(0, 32) } : {}),
+        // THE BRIDGE THIS GATEWAY RUNS OR ADOPTED — additive. `mode` is adopted | embedded |
+        // standalone | off; a client can say "bridge: provided by the gateway" and stop
+        // offering a second installer.
+        ...(bridgeSupervisor ? { bridge: bridgeSupervisor.status() } : {}),
         // `runtime` = 'native' (npm, fast quantized) | 'wasm' (binary, slow fp32) —
         // the extension uses it to advise the far-faster native gateway.
         stt: { enabled: cfg.stt?.enabled !== false, state: stt.state, ready: stt.ok, model: stt.model || cfg.stt?.model || DEFAULT_STT_MODEL, runtime: stt.runtime, dtype: stt.dtype },
@@ -2208,6 +2213,8 @@ function readRunHint(header, legacy) {
   return Object.keys(out).length ? out : null;
 }
 
+let bridgeSupervisor = null; // the running gateway's bridge controller (bridge-supervisor.js), for /health and shutdown
+
 export function start(cfg = loadConfig()) {
   installTimestampedConsole(); // every gateway log line gets a clock — before anything logs
   ensureGatewayToken(); // M2: load/create the admin-route token (best-effort)
@@ -2234,13 +2241,11 @@ export function start(cfg = loadConfig()) {
   server.listen(cfg.port, cfg.host, () => {
     console.log(`ChatPanel Privacy Gateway v${VERSION} on http://${cfg.host}:${cfg.port}`);
     console.log(`  backend  : ${cfg.backend}` + (cfg.backend === 'bridge' ? ` (agent: ${cfg.bridge.agent}, via ${cfg.bridge.url})` : ''));
-    // U3: report the bridge at startup so the operator sees the unified picture without
-    // running anything. Detect only — never force-spawn a managed service. Best-effort and
-    // non-fatal: a probe failure just logs "not detected".
-    import('./local-status.js')
-      .then((m) => m.bridgePresenceNote())
-      .then((note) => console.log(`  bridge   : ${note}`))
-      .catch(() => {});
+    // THE GATEWAY CARRIES THE BRIDGE (bridge-supervisor.js): adopt one that already answers
+    // (the desktop's, a standalone, launchd's), else start the embedded copy as a child and
+    // keep it up. One install for the user; two processes on purpose. Best-effort and
+    // non-fatal: the gateway runs without a bridge, it just has no local agents.
+    ensureBridge(cfg).then((c) => { bridgeSupervisor = c; }).catch((e) => console.log(`  bridge   : not supervised (${e?.message || e})`));
     console.log(`  redaction: ${cfg.redaction.tier}` + (cfg.redaction.detection?.backend && cfg.redaction.detection.backend !== 'off'
       ? ` + ${cfg.redaction.detection.backend} detector` : (cfg.ner?.autostart ? ' (+ NER starting…)' : '')));
     // M7: a non-loopback bind exposes the gateway on the LAN, where the per-request
@@ -2258,7 +2263,7 @@ export function start(cfg = loadConfig()) {
       .then((r) => { if (r?.ok) console.log(`  warm     : seeded ${r.ingested} records from ${r.file}`); })
       .catch(() => {});
   }
-  const shutdown = () => { ner?.stop(); entitlement.stop(); server.close(() => process.exit(0)); };
+  const shutdown = () => { ner?.stop(); entitlement.stop(); bridgeSupervisor?.stop(); server.close(() => process.exit(0)); };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
   return server;
