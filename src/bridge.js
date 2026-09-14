@@ -158,11 +158,23 @@ export async function openBridgeChat({ bridgeUrl, agent, token, messages, system
     options: options || {},
     ...(Array.isArray(specs) && specs.length ? { pageTools: { specs } } : {}),
   }), signal, tokenPath);
-  if (!res.ok || !res.body) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`bridge /chat HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`);
-  }
+  if (!res.ok || !res.body) throw new Error(await bridgeRefusal(res));
   return res;
+}
+
+/**
+ * What the bridge said when it refused a turn, as a sentence. The bridge answers
+ * `{ error: { message } }` — and for the commonest first-run failure that message is the
+ * whole story ("Claude Code isn't signed in … run `claude`, type `/login` …"). Wrapping it in
+ * `bridge /chat HTTP 503: {"error":{"message":"…` and cutting it at 200 characters turned the
+ * one useful sentence into JSON debris.
+ */
+export async function bridgeRefusal(res) {
+  const text = await res.text().catch(() => '');
+  let message = '';
+  try { const j = JSON.parse(text); message = String(j?.error?.message || j?.error || j?.message || '').trim(); } catch { /* not JSON */ }
+  if (message) return message.slice(0, 600);
+  return `bridge /chat HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ''}`;
 }
 
 // Stream a turn through the bridge. Calls onText(restorableChunk) for each delta, and
@@ -177,10 +189,7 @@ export async function streamBridgeChat({ bridgeUrl, agent, token, messages, syst
     options: options || {},
   }), signal, tokenPath);
 
-  if (!res.ok || !res.body) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`bridge /chat HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`);
-  }
+  if (!res.ok || !res.body) throw new Error(await bridgeRefusal(res));
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
