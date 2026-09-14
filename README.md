@@ -60,6 +60,13 @@ chatpanel-gateway
 #     bridge   : starting the embedded bridge (v0.11.20)
 ```
 
+On Windows, if `chatpanel-gateway` is "not recognized" right after `npm i -g`, npm's global bin
+folder is not on that shell's PATH yet: open a new PowerShell, or run it by path —
+`node "$(npm root -g)/@chatpanel/gateway/bin/chatpanel-gateway.js" --install`. npm may also warn
+that `boolean@3.2.0` is deprecated and that `onnxruntime-node` / `sharp` / `protobufjs` run install
+scripts: all three come through `@huggingface/transformers` (the native model runtime) and are
+expected.
+
 `GET /health` says which bridge it runs: `bridge.mode` is `embedded`, `standalone`,
 `adopted` or `off`. `CHATPANEL_BRIDGE_MANAGED=off` (or `bridge.managed: false`) turns the
 supervision off for a host that runs its own bridge — the desktop app does. A
