@@ -37,6 +37,14 @@ const child = spawn(process.execPath, ['--test', ...files], {
     CHATPANEL_ACCESS_LOG: join(dir, 'access-log.json'),
     CHATPANEL_MEMORY_STORE: join(dir, 'memory-store.enc'),
     CHATPANEL_PREFS_STORE: join(dir, 'prefs-store.enc'),
+    //   4. THE ORG'S RECORDS — team runs, projects, scorecards, engine ledgers. The route
+    //      tests create runs and projects through the real server; without these they landed
+    //      in ~/.chatpanel (a `run_http_*` per suite run, and a recruited project would have
+    //      shown on the owner's job board).
+    CHATPANEL_TEAMS_STORE: join(dir, 'team-runs.enc'),
+    CHATPANEL_PROJECTS_STORE: join(dir, 'projects.enc'),
+    CHATPANEL_SCORECARDS_STORE: join(dir, 'scorecards.json'),
+    CHATPANEL_ENGINES_STORE: join(dir, 'engines.json'),
     //   3. MODELS — every chat turn now asks ensureNer to start the bundled detector when
     //      its weights are on disk (0.6.72). On a developer's machine that IS the real
     //      ~/.chatpanel/models, so a suite written for deterministic-only redaction loaded

@@ -38,6 +38,7 @@ import { createTeamStore, loadOrCreateKey as loadTeamKey } from './team-store.js
 import { createScorecardStore } from './scorecard-store.js';
 import { createEngineLedgerStore } from './engine-ledger-store.js';
 import { createProjectStore } from './project-store.js';
+import { applicationsFor, recruitPass } from './recruiting.js';
 import { createHistoryStore } from './sqlite-store.js';
 import { ingestBackups } from './backup-ingest.js';
 import * as nerEngine from './ner-engine.js';
@@ -61,7 +62,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.90';
+export const VERSION = '0.6.91';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -844,6 +845,11 @@ export function createGateway(cfg = loadConfig()) {
     //   POST /v1/projects/:id/events { events }  → { ok, project }    the executive loop appends (status, run.linked, run.spent, decision, report)
     //   POST /v1/projects/:id/jobs { job, by }   → { ok, project }    post a job
     //   POST /v1/projects/:id/jobs/:jobId { patch, by } → { ok, project }  move it along its machine / applications / recruited / result
+    //   GET  /v1/projects/:id/jobs/:jobId/applications[?reach&chatModel] → { ok, job, applications, prompt, rows }
+    //                                              the pool applies at once (recruiting.js); `prompt` is the evaluator's, for the client's structured call
+    //   POST /v1/projects/:id/jobs/:jobId/recruit { by, reach, chatModel, evaluation? | text? } → { ok, project, decision, applications }
+    //                                              one pass: fit recomputed here, the client's evaluation read through the schema, the pick (or the
+    //                                              proposal) landed as events — with no evaluation the fit decides
     //   GET  /v1/projects/:id/events[?after]     (SSE)                hello, replay, then live
     //   DELETE /v1/projects/:id
     if (pathname === '/v1/projects' && req.method === 'GET') return sendJson(res, 200, { ok: true, projects: projectStore.list({ limit: url.searchParams.get('limit') || 50, status: url.searchParams.get('status') || '' }) });
@@ -855,10 +861,37 @@ export function createGateway(cfg = loadConfig()) {
       } catch (e) { return sendJson(res, 400, { error: { message: `project: ${e.message}`, type: 'project_error' } }); }
     }
     {
-      const m = /^\/v1\/projects\/([a-zA-Z0-9_-]{1,64})(\/events|\/jobs(?:\/([a-zA-Z0-9_-]{1,64}))?)?$/.exec(pathname);
+      const m = /^\/v1\/projects\/([a-zA-Z0-9_-]{1,64})(\/events|\/jobs(?:\/([a-zA-Z0-9_-]{1,64})(\/applications|\/recruit)?)?)?$/.exec(pathname);
       if (m) {
-        const id = m[1]; const sub = m[2] || ''; const jobId = m[3] || '';
+        const id = m[1]; const sub = m[2] || ''; const jobId = m[3] || ''; const act = m[4] || '';
         const notFound = () => sendJson(res, 404, { error: { message: `no project ${id}`, type: 'not_found' } });
+        if (act) {
+          const rec = projectStore.get(id);
+          if (!rec) return notFound();
+          const job = rec.jobs.find((j) => j.id === jobId);
+          if (!job) return sendJson(res, 404, { error: { message: `no job ${jobId}`, type: 'not_found' } });
+          const stores = { cfg, prefsStore, scorecards, engines };
+          if (act === '/applications' && req.method === 'GET') {
+            const out = await applicationsFor(job, { ...stores, reach: url.searchParams.get('reach') || 'any', chatModel: url.searchParams.get('chatModel') || null });
+            return sendJson(res, 200, { ok: true, job, ...out });
+          }
+          if (act === '/recruit' && req.method === 'POST') {
+            if (!['open', 'evaluating'].includes(job.status)) return sendJson(res, 400, { error: { message: `job ${jobId} is ${job.status}; only an open job is recruited`, type: 'project_error' } });
+            try {
+              const body = JSON.parse((await readBody(req, cfg.maxBodyBytes)).toString('utf8')) || {};
+              const by = String(body.by || 'evaluator').slice(0, 80);
+              const pass = await recruitPass(job, { ...stores, record: rec, reach: body.reach || 'any', chatModel: body.chatModel || null, evaluation: body.evaluation || null, text: body.text ?? null, by });
+              // Through the store's own moves, so the job's machine is checked on every step.
+              let project = null;
+              for (const e of pass.events) {
+                if (e.type === 'job.updated') project = projectStore.updateJob(id, jobId, e.job, { by: e.by || by });
+                else project = projectStore.append(id, [e]);
+              }
+              return sendJson(res, 200, { ok: true, project, decision: pass.decision, applications: pass.applications, evaluation: pass.evaluation });
+            } catch (e) { return sendJson(res, 400, { error: { message: `recruit: ${e.message}`, type: 'project_error' } }); }
+          }
+          return sendJson(res, 405, { error: { message: 'method not allowed', type: 'project_error' } });
+        }
         if (!sub && req.method === 'GET') { const p = projectStore.get(id, { events: url.searchParams.get('events') === '1' }); return p ? sendJson(res, 200, { ok: true, project: p }) : notFound(); }
         if (!sub && req.method === 'DELETE') return sendJson(res, 200, { ok: true, removed: projectStore.remove(id) });
         if (req.method === 'POST' && (sub === '/events' || sub.startsWith('/jobs'))) {
