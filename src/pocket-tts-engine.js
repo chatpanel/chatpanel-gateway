@@ -275,6 +275,14 @@ export class PocketTTS {
 
   async load(bundle = DEFAULT_BUNDLE, { quant = '_int8', onProgress, log = () => {} } = {}) {
     const dir = await ensureBundle(bundle, quant, { onProgress, log });
+    // The built-in speakers come WITH the model. `ensureVoicesBin` existed and nothing called
+    // it: the eight names were listed as "downloads on first use", the default voice was one
+    // of them, and picking any of them failed with "unknown built-in voice" on every machine
+    // but the one where the file had been fetched by hand. Best-effort — a failed download
+    // costs the stock voices and leaves cloning untouched.
+    if (!voicesBinOnDisk(bundle)) {
+      try { await ensureVoicesBin(bundle, { onProgress, log }); } catch (e) { log(`[pocket-tts] built-in voices not downloaded (${e.message}) — cloning still works`); }
+    }
     const ort = await getOrt();
     this.meta = JSON.parse(readFileSync(join(dir, 'bundle.json'), 'utf8'));
     this.tok = new SentencePieceUnigram(new Uint8Array(readFileSync(join(dir, 'tokenizer.model'))));

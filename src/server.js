@@ -63,7 +63,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.94';
+export const VERSION = '0.6.95';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -1502,6 +1502,7 @@ export function createGateway(cfg = loadConfig()) {
         // A model needing the native runtime is still LISTED on the binary, with the
         // reason — hiding it makes "why can't I clone my voice?" unanswerable.
         const nativeOk = rawOrtAvailable();
+        const activeEntry = TTS_MODEL_CATALOG.find((m) => m.id === active) || null;
         const available = /** @type {any[]} */ (TTS_MODEL_CATALOG.map((m) => ({
           ...m,
           installed: ttsEngine.modelOnDisk(m.id),
@@ -1524,8 +1525,12 @@ export function createGateway(cfg = loadConfig()) {
           // a style bank, VITS/MMS is single-speaker. An empty list tells the UI to
           // hide the picker rather than offer choices that cannot take effect.
           arch: ttsEngine.arch(),
-          supportsVoices: ttsEngine.supportsVoices(),
-          supportsCustomVoices: ttsEngine.supportsCustomVoices(),
+          // Until a model is LOADED the engine knows nothing, and answering "no voices"
+          // for a model that has eight made the client hide its picker on every fresh
+          // install (state 'off' → supportsVoices false → the single-speaker branch). Before
+          // the first load, the catalog answers for the active model.
+          supportsVoices: ttsEngine.arch() ? ttsEngine.supportsVoices() : (activeEntry ? activeEntry.arch === 'style-tts2' && !!activeEntry.voices : true),
+          supportsCustomVoices: ttsEngine.arch() ? ttsEngine.supportsCustomVoices() : !!activeEntry?.customVoices,
           sampleRate: ttsEngine.sampleRate(),
           // Built-in voices belong to Kokoro alone. VITS is single-speaker and
           // SpeechT5 speaks only in a RECORDED voice, so offering Kokoro's list
