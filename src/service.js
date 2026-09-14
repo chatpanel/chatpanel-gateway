@@ -81,6 +81,19 @@ const WIN_RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const WIN_RUN_NAME = 'ChatPanelGateway';
 const winVbs = () => path.join(os.homedir(), '.chatpanel', 'gateway-launch.vbs');
 
+/**
+ * Stop every running gateway process — the exe, the npm build under node, and the embedded
+ * bridge child (`--bridge`) — except this one. Matched on the command line, because on the
+ * npm path the process is `node.exe` and `taskkill /IM chatpanel-gateway.exe` never saw it.
+ * launchd restarts the macOS service for us; Windows has no supervisor, so `--install` after an
+ * update used to launch a second instance that died on the busy port while the OLD build kept
+ * answering /health with its old version.
+ */
+function winStopRunning() {
+  const ps = `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'chatpanel-gateway' -and $_.ProcessId -ne ${process.pid} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+  run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { timeout: 15000 });
+  run('taskkill', ['/IM', 'chatpanel-gateway.exe', '/F']); // belt and braces for the exe
+}
 function winInstall() {
   const { program, args } = resolveLaunch();
   const parts = [program, ...args].map((p) => `""${p}""`).join(' ');
@@ -89,11 +102,14 @@ function winInstall() {
   writeFileSync(vbs, `CreateObject("WScript.Shell").Run "${parts}", 0, False\r\n`);
   const r = run('reg', ['add', WIN_RUN_KEY, '/v', WIN_RUN_NAME, '/t', 'REG_SZ', '/d', `wscript.exe "${vbs}"`, '/f']);
   if (r.status !== 0) throw new Error((r.stderr || '').trim() || 'reg add failed');
+  winStopRunning();
+  // Give the port a moment to be released before the new instance binds it.
+  run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Milliseconds 800']);
   run('wscript.exe', [vbs]);
 }
 function winUninstall() {
   run('reg', ['delete', WIN_RUN_KEY, '/v', WIN_RUN_NAME, '/f']);
-  run('taskkill', ['/IM', 'chatpanel-gateway.exe', '/F']);
+  winStopRunning();
 }
 function winStatus() {
   return run('reg', ['query', WIN_RUN_KEY, '/v', WIN_RUN_NAME]).status === 0;
