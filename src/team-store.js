@@ -252,7 +252,7 @@ export class TeamStore {
   }
   remove(id) {
     const had = this.runs.delete(String(id || ''));
-    if (had) this.save();
+    if (had) { this.watchers.delete(String(id || '')); this.save(); }
     return had;
   }
   get size() { return this.runs.size; }

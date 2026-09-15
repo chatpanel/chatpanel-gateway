@@ -64,7 +64,7 @@ import * as openai from './openai.js';
 import * as responses from './responses.js';
 import * as anthropic from './anthropic.js';
 
-export const VERSION = '0.6.109';
+export const VERSION = '0.6.110';
 
 // WARM search tier — SQLite + FTS5 record store (falls back to an encrypted-JSON
 // store if SQLite can't load), fed by the extension's ingest sync + backup-ingest.
@@ -1005,7 +1005,7 @@ export function createGateway(cfg = loadConfig()) {
     //   GET  /v1/teams/runs/:id/checkpoint → { ok, checkpoint }  what resumeTeam needs, from the record
     //   POST /v1/teams/runs/:id/claim { client } → { ok, run }  a client takes a stopped/stale run over
     //   POST /v1/teams/runs/:id/stop         → { ok, run }             a stop request any client may make
-    //   DELETE /v1/teams/runs/:id            → { ok, removed }
+    //   DELETE /v1/teams/runs/:id            → { ok, removed }      a live run is stopped first (0.6.110)
     if (pathname === '/v1/teams/runs' && req.method === 'GET') {
       return sendJson(res, 200, { ok: true, runs: teamStore.list({ limit: url.searchParams.get('limit') || 50, team: url.searchParams.get('team') || '' }) });
     }
@@ -1026,7 +1026,13 @@ export function createGateway(cfg = loadConfig()) {
           const run = teamStore.get(id, { events: url.searchParams.get('events') === '1' });
           return run ? sendJson(res, 200, { ok: true, run }) : sendJson(res, 404, { error: { message: `no run ${id}`, type: 'not_found' } });
         }
-        if (!sub && req.method === 'DELETE') return sendJson(res, 200, { ok: true, removed: teamStore.remove(id) });
+        if (!sub && req.method === 'DELETE') {
+          // A live run is stopped BEFORE its record goes (0.6.110), so the client running it
+          // hears `run.stop-requested` on its tail. Removing the record alone left the member
+          // working on for a run nobody could see, its appends failing until it gave up.
+          teamStore.stop(id);
+          return sendJson(res, 200, { ok: true, removed: teamStore.remove(id) });
+        }
         if (sub === '/stop' && req.method === 'POST') {
           const run = teamStore.stop(id);
           return run ? sendJson(res, 200, { ok: true, run }) : sendJson(res, 404, { error: { message: `no run ${id}`, type: 'not_found' } });

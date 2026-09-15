@@ -123,6 +123,26 @@ test('the routes: create, append, read, tail live over SSE, stop from another cl
   await fetch(`${base}/v1/teams/runs/${id}`, { method: 'DELETE', headers: H });
 });
 
+test('deleting a live run stops it first: the runner\'s tail hears the stop, then the record is gone (0.6.110)', async () => {
+  const { base } = await gateway();
+  const id = `run_rm_${Date.now().toString(36)}`;
+  await (await fetch(`${base}/v1/teams/runs`, { method: 'POST', headers: H, body: JSON.stringify({ id, team: 'research', request: 'orphaned', client: 'extension' }) })).json();
+  const tail = sse(await fetch(`${base}/v1/teams/runs/${id}/events`, { headers: H }));
+  await fetch(`${base}/v1/teams/runs/${id}/events`, { method: 'POST', headers: H, body: JSON.stringify({ events: [{ type: 'run.started', at: 1 }] }) });
+  await tail.until(2); // hello, run.started
+  const rm = await (await fetch(`${base}/v1/teams/runs/${id}`, { method: 'DELETE', headers: H })).json();
+  assert.equal(rm.removed, true);
+  await tail.until(3);
+  assert.equal(tail.got.at(-1).type, 'run.stop-requested');
+  await tail.close();
+  assert.equal((await fetch(`${base}/v1/teams/runs/${id}`, { headers: H })).status, 404);
+  const list = await (await fetch(`${base}/v1/teams/runs?limit=50`, { headers: H })).json();
+  assert.ok(!list.runs.some((r) => r.id === id), 'a deleted run is not in recent');
+  // Deleting a finished run is not a stop: no event is appended to a run that no longer exists, and it is idempotent.
+  const again = await (await fetch(`${base}/v1/teams/runs/${id}`, { method: 'DELETE', headers: H })).json();
+  assert.equal(again.removed, false);
+});
+
 test('the board: threads and posts fold on the record; a person answers an ask from another client and the runner\'s tail sees it; decisions land', async () => {
   const { base } = await gateway();
   const id = `run_board_${Date.now().toString(36)}`;
